@@ -189,11 +189,24 @@ def look_angles(
     return azimuth_deg, elevation_deg, range_m
 
 
-def sample_circular_orbit(rng: Random) -> CircularOrbit:
-    """Sample orbit altitude uniformly and orientation isotropically."""
-    inclination = degrees(acos(rng.uniform(-1.0, 1.0)))
+def sample_circular_orbit(
+    rng: Random,
+    altitude_min_m: float = MIN_ORBIT_ALTITUDE_M,
+    altitude_max_m: float = MAX_ORBIT_ALTITUDE_M,
+    inclination_min_deg: float = 0.0,
+    inclination_max_deg: float = 180.0,
+) -> CircularOrbit:
+    """Sample orbit altitude uniformly and orientation within the given bounds."""
+    if not MIN_ORBIT_ALTITUDE_M <= altitude_min_m <= altitude_max_m <= MAX_ORBIT_ALTITUDE_M:
+        raise ValueError("orbit altitude range must stay within 300-3000 km")
+    if not 0.0 <= inclination_min_deg <= inclination_max_deg <= 180.0:
+        raise ValueError("inclination range must stay within 0-180 deg")
+    if inclination_min_deg == 0.0 and inclination_max_deg == 180.0:
+        inclination = degrees(acos(rng.uniform(-1.0, 1.0)))
+    else:
+        inclination = rng.uniform(inclination_min_deg, inclination_max_deg)
     return CircularOrbit(
-        altitude_m=rng.uniform(MIN_ORBIT_ALTITUDE_M, MAX_ORBIT_ALTITUDE_M),
+        altitude_m=rng.uniform(altitude_min_m, altitude_max_m),
         inclination_deg=inclination,
         raan_deg=rng.uniform(0.0, 360.0),
         phase_deg=rng.uniform(0.0, 360.0),
@@ -261,6 +274,10 @@ def sample_visible_pass(
     observer: GroundObserver,
     minimum_elevation_deg: float = 10.0,
     max_attempts: int = 100,
+    altitude_min_m: float = MIN_ORBIT_ALTITUDE_M,
+    altitude_max_m: float = MAX_ORBIT_ALTITUDE_M,
+    inclination_min_deg: float = 0.0,
+    inclination_max_deg: float = 180.0,
 ) -> VisiblePass:
     """Sample a circular orbit whose closest approach clears the elevation mask."""
     if max_attempts < 1:
@@ -268,7 +285,13 @@ def sample_visible_pass(
 
     for _ in range(max_attempts):
         candidate = align_orbit_for_pass(
-            sample_circular_orbit(rng),
+            sample_circular_orbit(
+                rng,
+                altitude_min_m=altitude_min_m,
+                altitude_max_m=altitude_max_m,
+                inclination_min_deg=inclination_min_deg,
+                inclination_max_deg=inclination_max_deg,
+            ),
             observer,
             minimum_elevation_deg,
         )

@@ -2,7 +2,16 @@ import math
 
 import pytest
 
-from blender_synth_lc.attitude import is_rotating, spin_phase_rad
+from random import Random
+
+from blender_synth_lc.attitude import (
+    is_rotating,
+    load_model_spin_axes,
+    sample_spin_axis,
+    sample_spin_period_s,
+    spin_axis_options,
+    spin_phase_rad,
+)
 
 
 def test_period_at_three_minutes_is_rotating():
@@ -49,3 +58,47 @@ def test_rotating_phase_advances_and_wraps():
 def test_invalid_period_is_rejected(period_s):
     with pytest.raises(ValueError):
         is_rotating(period_s)
+
+
+def test_sampled_static_period_is_zero():
+    assert sample_spin_period_s(Random(3), rotating=False) == 0.0
+
+
+def test_sampled_rotating_period_stays_inside_allowed_window():
+    period = sample_spin_period_s(Random(3), rotating=True)
+
+    assert 3.0 <= period <= 180.0
+    assert is_rotating(period)
+
+
+def test_model_spin_axes_are_loaded_and_unlisted_models_allow_xyz(tmp_path):
+    config_path = tmp_path / "spin_axes.json"
+    config_path.write_text(
+        '{"SL-14.blend": {"spin_axes": ["X", "Z"]}}', encoding="utf-8"
+    )
+
+    model_spin_axes = load_model_spin_axes(config_path)
+
+    assert spin_axis_options("SL-14.blend", model_spin_axes) == (
+        (1.0, 0.0, 0.0),
+        (0.0, 0.0, 1.0),
+    )
+    assert spin_axis_options("Topex_good.blend", model_spin_axes) == (
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0),
+    )
+    assert sample_spin_axis(Random(7), "SL-14.blend", model_spin_axes) in {
+        (1.0, 0.0, 0.0),
+        (0.0, 0.0, 1.0),
+    }
+
+
+def test_model_spin_axes_reject_invalid_axis_names(tmp_path):
+    config_path = tmp_path / "spin_axes.json"
+    config_path.write_text(
+        '{"SL-14.blend": {"spin_axes": ["W"]}}', encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="invalid spin axis"):
+        load_model_spin_axes(config_path)

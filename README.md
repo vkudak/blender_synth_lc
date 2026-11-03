@@ -26,12 +26,65 @@ Run the unit tests:
 .venv/bin/python -m pytest -q
 ```
 
-Light-curve rendering defaults to `--device auto`, which prefers an enumerated GPU and uses CPU only when Cycles finds no GPU. Explicit options are `--device cuda`, `--device optix`, and `--device cpu`. If a GPU is detected but its render kernel fails to load, Blender reports an error instead of silently shifting a large run to CPU.
+## Generate Light Curves
 
-The current Quadro P520 is detected by Cycles, but driver 470.256.02 fails to load Blender's `sm_61` CUDA kernel. NVIDIA's CUDA compatibility table gives 525 as the minimum driver branch for CUDA 12.x; Blender 4.5's OptiX path requires driver 535 or newer. A supported 535+ driver is a reasonable next test, but the GPU render must be revalidated after installation.
+Both generator scripts read an INI file. Run them from the repository root; relative model and output paths in the INI are resolved from that root. `--config` is optional because each script has a default: `config/curve.ini` for one curve and `config/dataset.ini` for a batch.
+
+### Single Curve
+
+Edit `config/curve.ini` to choose the Blender executable, model, output CSV, and scenario settings. Then run:
+
+```bash
+.venv/bin/python scripts/generate_curve.py --config config/curve.ini
+```
+
+The single-curve config selects one model via `[paths] model`. The script writes the CSV named by `[paths] output` plus matching `.json` metadata and `.svg` diagnostic plot. To override common values without editing the INI:
+
+```bash
+.venv/bin/python scripts/generate_curve.py \
+  --config config/curve.ini \
+  --model models/Lotos_model.blend \
+  --output reports/lotos_test.csv \
+  --seed 123 --device cpu
+```
+
+Supported single-curve overrides are `--model`, `--output`, `--seed`, and `--device`.
+
+### Dataset
+
+Edit `config/dataset.ini`. Set `[paths] models_dir`, optional comma-separated `[paths] models`, `[paths] skip_models`, `[paths] output_dir`, and `[dataset] curves_per_model`. If `models` is blank, every `.blend` in `models_dir` is used except names listed in `skip_models`. If it is non-empty, it selects those models instead. Empty-geometry models cannot render and should be excluded.
+
+Run the configured batch:
+
+```bash
+.venv/bin/python scripts/generate_dataset.py --config config/dataset.ini
+```
+
+For a small smoke run on one model, without changing the INI:
+
+```bash
+.venv/bin/python scripts/generate_dataset.py \
+  --config config/dataset.ini \
+  --model Lotos_model.blend \
+  --curves-per-model 1 \
+  --output-dir reports/dataset_smoke \
+  --device cpu
+```
+
+Dataset options `--model` can be repeated to select multiple models; each selected name is resolved in `models_dir`. The other supported overrides are `--output-dir`, `--curves-per-model`, `--seed`, and `--device`. Total curves are the number of selected usable models multiplied by `curves_per_model`. Output names follow `{model}_seed{model-seed}_n{index:04d}.csv`; the seed advances by 10,000 for each model, and the zero-based index restarts at `0000` for each model. Each CSV has matching `.json` and `.svg` sidecars.
+
+### INI Settings And Render Device
+
+The INI files share `[blender]`, `[paths]`, `[run]`, `[observer]`, `[orbit]`, `[pass]`, `[attitude]`, `[sun]`, and `[render]` sections. The dataset config additionally has `[dataset]`. Edit these sections to configure the Blender executable and paths, seed/device, fixed or random observer and orbit, pass duration/cadence/elevation mask, attitude/spin, sun direction, and render resolution/samples. CLI values listed above override the corresponding INI values; other settings are controlled in the INI.
+
+`[run] device` accepts `auto`, `cuda`, `optix`, or `cpu`. `auto` prefers an available GPU backend; use `cpu` as a compatibility fallback. If Blender detects a GPU but cannot load its render kernel, the render fails rather than silently moving a large batch to CPU. The checked-in configs request `cuda`, which has been confirmed working on the Quadro P520 with driver 580. For dataset-scale runs, verify the GPU with a small batch first; select `cpu` only if you need a compatibility fallback.
+
+The renderer parents every mesh with geometry to a common root, so multi-part models can spin as one body. Sun direction is sampled per curve; samples in a cylindrical Earth shadow are stored with zero flux and are not rendered. Relative flux remains a linear RGB proxy with a simple inverse-square range correction, not a calibrated magnitude.
 
 The current Python core includes WGS-84 ground observer coordinates, circular two-body orbit propagation for altitudes of 300-3000 km, seeded parameter samplers, and visible-pass selection. The pass sampler aligns orbital phase to closest approach, rejects candidates below a configurable elevation mask, and samples the satellite's moving position, velocity, range, azimuth, and elevation over the pass window. Earth rotation is intentionally ignored, so the observer and local horizon remain fixed during each synthetic pass.
 
 Satellite self-rotation is separate from orbital motion. Period 0 means no rotation; rotating periods from 3 through 180 seconds are retained. Positive periods below 3 seconds and periods over 180 seconds are excluded and rejected, not relabeled as static.
 
-Light-curve photometry/rendering, physical-scale calibration, and batch dataset generation are the next implementation stages.
+Allowed spin axes are configured in `models/spin_axes.json`, keyed by `.blend` filename. For example, `{"SL-14.blend": {"spin_axes": ["X", "Z"]}}` selects one of those Blender scene axes for each curve. Models not listed there select from X, Y, and Z. The selection is deterministic for a given seed.
+
+Physical-scale calibration of the `.blend` assets and a large 5–10k GPU dataset run are the next stages.
