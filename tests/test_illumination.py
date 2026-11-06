@@ -1,6 +1,7 @@
 from random import Random
 
 from blender_synth_lc.illumination import (
+    eclipse_fraction,
     is_eclipsed,
     sample_sun_direction,
     sunlit_pass_exists,
@@ -44,3 +45,10 @@ def test_sunlit_pass_requires_at_least_one_visible_sample():
 
     assert not sunlit_pass_exists((night, night), sun_direction)
     assert sunlit_pass_exists((night, day), sun_direction)
+
+
+def test_eclipse_fraction_counts_shadowed_samples():
+    night = (-EARTH_EQUATORIAL_RADIUS_M - 800_000.0, 0.0, 0.0)
+    day = (EARTH_EQUATORIAL_RADIUS_M + 800_000.0, 0.0, 0.0)
+
+    assert eclipse_fraction((night, day, day, day, day, day, day), (1.0, 0.0, 0.0)) == 1 / 7

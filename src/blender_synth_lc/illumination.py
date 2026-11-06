@@ -50,3 +50,11 @@ def is_eclipsed(
 
 def sunlit_pass_exists(positions_m: tuple[Vector3, ...], sun_direction: Vector3) -> bool:
     return any(not is_eclipsed(position, sun_direction) for position in positions_m)
+
+
+def eclipse_fraction(positions_m: tuple[Vector3, ...], sun_direction: Vector3) -> float:
+    if not positions_m:
+        raise ValueError("positions_m must not be empty")
+    return sum(is_eclipsed(position, sun_direction) for position in positions_m) / len(
+        positions_m
+    )

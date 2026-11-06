@@ -112,6 +112,32 @@ class PassSample:
     visible: bool
 
 
+def longest_visible_window(samples: tuple[PassSample, ...]) -> tuple[PassSample, ...]:
+    windows = []
+    current = []
+    for sample in samples:
+        if sample.visible:
+            current.append(sample)
+        elif current:
+            windows.append(tuple(current))
+            current.clear()
+    if current:
+        windows.append(tuple(current))
+    if not windows:
+        return ()
+    return max(
+        windows,
+        key=lambda window: (
+            len(window),
+            -abs(
+                (window[0].time_from_closest_approach_s
+                 + window[-1].time_from_closest_approach_s)
+                / 2.0
+            ),
+        ),
+    )
+
+
 def sample_ground_observer(rng: Random, altitude_m: float = 0.0) -> GroundObserver:
     """Sample a point uniformly by area on a spherical latitude/longitude grid."""
     latitude = degrees(asin_clamped(2.0 * rng.random() - 1.0))

@@ -23,13 +23,7 @@ def blender_command(
 ) -> list[str]:
     if not config.blender.is_file():
         raise FileNotFoundError(f"Blender executable not found: {config.blender}")
-    command = [
-        str(config.blender),
-        "--background",
-        str(model),
-        "--python",
-        str(RENDER_SCRIPT),
-        "--",
+    render_args = [
         "--config",
         str(config.config_path),
         "--kind",
@@ -46,10 +40,43 @@ def blender_command(
     output_path = config.output if output is None else output
     output_directory = config.output_dir if output_dir is None else output_dir
     if config.kind == "curve" and output_path is not None:
-        command.extend(["--output", str(output_path)])
+        render_args.extend(["--output", str(output_path)])
     else:
-        command.extend(["--output-dir", str(output_directory)])
+        render_args.extend(["--output-dir", str(output_directory)])
+
+    script_path = RENDER_SCRIPT
+    script_args = render_args
+    if config.script_output is not None:
+        script_path = config.script_output
+        _write_render_script(script_path, render_args)
+        script_args = []
+
+    command = [
+        str(config.blender),
+        "--background",
+        str(model),
+        "--python",
+        str(script_path),
+        "--",
+        *script_args,
+    ]
     return command
+
+
+def _write_render_script(path: Path, render_args: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    source = RENDER_SCRIPT.read_text(encoding="utf-8")
+    source = source.replace(
+        "import sys\n",
+        f"import sys\nsys.argv = [{str(path)!r}, '--', *{render_args!r}]\n",
+        1,
+    )
+    source = source.replace(
+        "REPO_ROOT = Path(__file__).resolve().parents[1]",
+        f"REPO_ROOT = Path({str(PROJECT_ROOT)!r})",
+        1,
+    )
+    path.write_text(source, encoding="utf-8")
 
 
 def run_blender(command: list[str]) -> int:

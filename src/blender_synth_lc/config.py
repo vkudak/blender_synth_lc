@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import configparser
 from dataclasses import dataclass, replace
+from math import isfinite
 from pathlib import Path
 
 from . import MIN_ROTATION_PERIOD_S, ROTATION_PERIOD_CUTOFF_S
@@ -55,11 +56,23 @@ class SynthConfig:
     rotating_fraction: float
     initial_phase_mode: str
     initial_phase_rad: float
+    precession_angle_deg: float
+    precession_period_s: float
+    precession_phase_deg: float
+    precession_angle_min_deg: float
+    precession_angle_max_deg: float
+    precession_period_min_s: float
+    precession_period_max_s: float
     sun_mode: str
     sun_direction: tuple[float, float, float]
     sun_energy: float
+    max_eclipse_fraction: float
     resolution: int
     samples: int
+    exposure: float
+    script_output: Path | None
+    scene_meters_per_unit: float
+    satellite_size_m: float
 
 
 def load_config(path: Path, kind: str) -> SynthConfig:
@@ -102,6 +115,19 @@ def load_config(path: Path, kind: str) -> SynthConfig:
         get("paths", "output_dir", "reports/dataset" if kind == "dataset" else "reports"),
         config_path,
     )
+    script_output_value = get("render", "script_output", fallback="").strip()
+    script_output = (
+        _resolve_path(script_output_value, config_path) if script_output_value else None
+    )
+    scene_meters_per_unit = getfloat("render", "scene_meters_per_unit", 1.0)
+    satellite_size_m = getfloat("render", "satellite_size_m", 4.0)
+    max_eclipse_fraction = getfloat("sun", "max_eclipse_fraction", 0.15)
+    if scene_meters_per_unit <= 0.0:
+        raise ValueError("render.scene_meters_per_unit must be positive")
+    if satellite_size_m <= 0.0:
+        raise ValueError("render.satellite_size_m must be positive")
+    if not 0.0 <= max_eclipse_fraction < 1.0:
+        raise ValueError("sun.max_eclipse_fraction must be in [0, 1)")
     selected_models = _split_list(get("paths", "models", fallback=""))
     skip_models = tuple(
         _split_list(get("paths", "skip_models", fallback=",".join(DEFAULT_SKIP_MODELS)))
@@ -111,6 +137,52 @@ def load_config(path: Path, kind: str) -> SynthConfig:
     spin_period_max_s = getfloat("attitude", "spin_period_max_s", ROTATION_PERIOD_CUTOFF_S)
     if spin_period_min_s <= 0.0 or spin_period_max_s < spin_period_min_s:
         raise ValueError("spin_period_min_s must be positive and not exceed spin_period_max_s")
+
+    precession_angle_deg = getfloat("attitude", "precession_angle_deg", 0.0)
+    precession_period_s = getfloat("attitude", "precession_period_s", 0.0)
+    precession_phase_deg = getfloat("attitude", "precession_phase_deg", 0.0)
+    precession_angle_min_deg = (
+        parser.getfloat("dataset", "precession_angle_min_deg", fallback=precession_angle_deg)
+        if kind == "dataset"
+        else precession_angle_deg
+    )
+    precession_angle_max_deg = (
+        parser.getfloat("dataset", "precession_angle_max_deg", fallback=precession_angle_deg)
+        if kind == "dataset"
+        else precession_angle_deg
+    )
+    precession_period_min_s = (
+        parser.getfloat("dataset", "precession_period_min_s", fallback=precession_period_s)
+        if kind == "dataset"
+        else precession_period_s
+    )
+    precession_period_max_s = (
+        parser.getfloat("dataset", "precession_period_max_s", fallback=precession_period_s)
+        if kind == "dataset"
+        else precession_period_s
+    )
+    if not all(isfinite(value) for value in (
+        precession_angle_deg,
+        precession_period_s,
+        precession_phase_deg,
+        precession_angle_min_deg,
+        precession_angle_max_deg,
+        precession_period_min_s,
+        precession_period_max_s,
+    )):
+        raise ValueError("precession settings must be finite")
+    if not 0.0 <= precession_angle_deg <= 180.0:
+        raise ValueError("attitude.precession_angle_deg must be in [0, 180]")
+    if precession_period_s < 0.0 or (
+        precession_angle_deg > 0.0 and precession_period_s <= 0.0
+    ):
+        raise ValueError(
+            "attitude.precession_period_s must be positive when precession is enabled"
+        )
+    if not 0.0 <= precession_angle_min_deg <= precession_angle_max_deg <= 180.0:
+        raise ValueError("dataset precession angle range must be within [0, 180]")
+    if precession_period_min_s <= 0.0 or precession_period_max_s < precession_period_min_s:
+        raise ValueError("dataset precession period range must be positive and ordered")
 
     altitude_min_m = getfloat("orbit", "altitude_min_km", MIN_ORBIT_ALTITUDE_M / 1000.0) * 1000.0
     altitude_max_m = getfloat("orbit", "altitude_max_km", MAX_ORBIT_ALTITUDE_M / 1000.0) * 1000.0
@@ -187,6 +259,13 @@ def load_config(path: Path, kind: str) -> SynthConfig:
         rotating_fraction=rotating_fraction,
         initial_phase_mode=initial_phase_mode,
         initial_phase_rad=getfloat("attitude", "initial_phase_rad", 0.0),
+        precession_angle_deg=precession_angle_deg,
+        precession_period_s=precession_period_s,
+        precession_phase_deg=precession_phase_deg,
+        precession_angle_min_deg=precession_angle_min_deg,
+        precession_angle_max_deg=precession_angle_max_deg,
+        precession_period_min_s=precession_period_min_s,
+        precession_period_max_s=precession_period_max_s,
         sun_mode=sun_mode,
         sun_direction=(
             getfloat("sun", "x", 0.71),
@@ -194,8 +273,13 @@ def load_config(path: Path, kind: str) -> SynthConfig:
             getfloat("sun", "z", 0.56),
         ),
         sun_energy=getfloat("sun", "energy", 3.0),
+        max_eclipse_fraction=max_eclipse_fraction,
         resolution=getint("render", "resolution", 128),
         samples=getint("render", "samples", 8),
+        exposure=getfloat("render", "exposure", -8.8),
+        script_output=script_output,
+        scene_meters_per_unit=scene_meters_per_unit,
+        satellite_size_m=satellite_size_m,
     )
     if kind == "curve" and config.model is None:
         raise ValueError("curve config requires paths.model")

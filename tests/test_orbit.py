@@ -6,7 +6,9 @@ from blender_synth_lc.orbit import (
     EARTH_EQUATORIAL_RADIUS_M,
     CircularOrbit,
     GroundObserver,
+    PassSample,
     align_orbit_for_pass,
+    longest_visible_window,
     look_angles,
     observer_position_ecef,
     sample_circular_orbit,
@@ -163,6 +165,27 @@ class CircularOrbitTests(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             sample_pass_window(visible_pass, observer, duration_s=10.0, cadence_s=3.0)
+
+    def test_longest_visible_window_selects_contiguous_samples(self):
+        samples = tuple(
+            PassSample(
+                time_from_closest_approach_s=float(index - 3),
+                position_m=(0.0, 0.0, 0.0),
+                velocity_m_s=(0.0, 0.0, 0.0),
+                azimuth_deg=0.0,
+                elevation_deg=20.0 if visible else 0.0,
+                range_m=1.0,
+                visible=visible,
+            )
+            for index, visible in enumerate((True, False, True, True, True, False, True))
+        )
+
+        window = longest_visible_window(samples)
+
+        self.assertEqual(
+            tuple(sample.time_from_closest_approach_s for sample in window),
+            (-1.0, 0.0, 1.0),
+        )
 
 
 if __name__ == "__main__":

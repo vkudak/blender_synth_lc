@@ -7,6 +7,8 @@ from random import Random
 from blender_synth_lc.attitude import (
     is_rotating,
     load_model_spin_axes,
+    precession_phase_rad,
+    sample_precession_parameters,
     sample_spin_axis,
     sample_spin_period_s,
     spin_axis_options,
@@ -52,6 +54,43 @@ def test_rotating_phase_advances_and_wraps():
     phase = spin_phase_rad(60.0, 90.0, 0.0)
 
     assert phase == pytest.approx(math.pi)
+
+
+def test_precession_phase_advances_from_configured_initial_phase():
+    phase = precession_phase_rad(60.0, 15.0, math.pi / 3.0)
+
+    assert phase == pytest.approx(5.0 * math.pi / 6.0)
+
+
+def test_precession_phase_wraps_for_negative_time():
+    phase = precession_phase_rad(60.0, -15.0)
+
+    assert phase == pytest.approx(3.0 * math.pi / 2.0)
+
+
+def test_precession_requires_positive_finite_period():
+    for period_s in (0.0, -1.0, math.inf, math.nan):
+        with pytest.raises(ValueError):
+            precession_phase_rad(period_s, 0.0)
+
+
+def test_sampled_precession_parameters_stay_in_ranges_and_are_reproducible():
+    parameters = sample_precession_parameters(Random(23), True, 5.0, 30.0, 20.0, 180.0)
+    repeated = sample_precession_parameters(Random(23), True, 5.0, 30.0, 20.0, 180.0)
+    angle_deg, period_s, phase_rad = parameters
+
+    assert parameters == repeated
+    assert 5.0 <= angle_deg <= 30.0
+    assert 20.0 <= period_s <= 180.0
+    assert 0.0 <= phase_rad < math.tau
+
+
+def test_static_satellite_has_no_sampled_precession():
+    assert sample_precession_parameters(Random(23), False, 5.0, 30.0, 20.0, 180.0) == (
+        0.0,
+        0.0,
+        0.0,
+    )
 
 
 @pytest.mark.parametrize("period_s", [-1.0, math.inf, math.nan])

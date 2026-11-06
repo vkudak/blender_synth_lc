@@ -93,6 +93,34 @@ def spin_phase_rad(
     return (initial_phase_rad + tau * time_s / period_s) % tau
 
 
+def precession_phase_rad(
+    period_s: float,
+    time_s: float,
+    initial_phase_rad: float = 0.0,
+) -> float:
+    if not all(isfinite(value) for value in (period_s, time_s, initial_phase_rad)):
+        raise ValueError("period_s, time_s, and initial_phase_rad must be finite")
+    if period_s <= 0.0:
+        raise ValueError("precession period_s must be positive")
+    return (initial_phase_rad + tau * time_s / period_s) % tau
+
+
+def sample_precession_parameters(
+    rng: Random,
+    rotating: bool,
+    angle_min_deg: float,
+    angle_max_deg: float,
+    period_min_s: float,
+    period_max_s: float,
+) -> tuple[float, float, float]:
+    if not rotating:
+        return 0.0, 0.0, 0.0
+    angle_deg = rng.uniform(angle_min_deg, angle_max_deg)
+    period_s = rng.uniform(period_min_s, period_max_s)
+    phase_rad = rng.random() * tau
+    return angle_deg, period_s, phase_rad
+
+
 def sample_spin_period_s(
     rng: Random,
     rotating: bool | None = None,
