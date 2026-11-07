@@ -23,4 +23,4 @@ Roadmap items for the Blender Synthetic Light Curves project. Items are ordered 
 - [ ] **Monochrome sensor and filters** — Integrate linear RGB renders into one sensor-weighted flux per sample with configurable filter responses; treat RGB-based spectral response as approximate until material and sensor spectra are available.
 - [ ] **Multi-object scenes** — Handle multiple spacecraft/fragments sharing a render.
 - [ ] **CI & reproducibility** — Golden-file regression tests for rendered curves and automated checks of config/schema.
-- [ ] **Documentation** — Per-section INI reference and worked examples for custom spin-axis/precession configurations.
+- [x] **Documentation** — Per-section INI reference and worked examples for custom spin-axis/precession configurations.

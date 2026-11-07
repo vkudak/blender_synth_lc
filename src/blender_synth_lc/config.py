@@ -219,11 +219,16 @@ def load_config(path: Path, kind: str) -> SynthConfig:
     rotating_fraction = getfloat("attitude", "rotating_fraction", 0.5)
     precession_fraction = 1.0
     if kind == "dataset":
-        count = parser.getint("dataset", "curves_per_model", fallback=2)
+        if parser.has_option("dataset", "curves_per_model"):
+            raise ValueError(
+                "dataset.curves_per_model is no longer supported; "
+                "use dataset.total_curves"
+            )
+        count = parser.getint("dataset", "total_curves", fallback=10_000)
         rotating_fraction = parser.getfloat("dataset", "rotating_fraction", fallback=rotating_fraction)
         precession_fraction = parser.getfloat("dataset", "precession_fraction", fallback=0.5)
     if count < 1:
-        raise ValueError("count/curves_per_model must be at least 1")
+        raise ValueError("count/total_curves must be at least 1")
     if not 0.0 <= rotating_fraction <= 1.0:
         raise ValueError("rotating_fraction must be in [0, 1]")
     if not 0.0 <= precession_fraction <= 1.0:

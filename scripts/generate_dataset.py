@@ -30,7 +30,7 @@ def parse_arguments():
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "optix"))
     parser.add_argument("--seed", type=int)
-    parser.add_argument("--curves-per-model", type=int)
+    parser.add_argument("--total-curves", type=int)
     parser.add_argument(
         "--force_indexes",
         "--force-indexes",
@@ -38,6 +38,18 @@ def parse_arguments():
         help="Delete saved dataset indexes and generate all requested curves again.",
     )
     return parser.parse_args()
+
+
+def distribute_curve_counts(total_curves: int, model_count: int) -> tuple[int, ...]:
+    if model_count < 1:
+        raise ValueError("At least one model is required")
+    if total_curves < model_count:
+        raise ValueError("total_curves must be at least the number of selected models")
+    curves_per_model, remainder = divmod(total_curves, model_count)
+    return tuple(
+        curves_per_model + (model_index < remainder)
+        for model_index in range(model_count)
+    )
 
 
 def main():
@@ -51,9 +63,14 @@ def main():
         output_dir=output_dir,
         device=args.device,
         seed=args.seed,
-        count=args.curves_per_model,
+        count=args.total_curves,
     )
     models = usable_models(config)
+    try:
+        curve_counts = distribute_curve_counts(config.count, len(models))
+    except ValueError as error:
+        print(f"WARNING: Dataset generation stopped: {error}", file=sys.stderr)
+        return 1
     try:
         empty_mesh_models = find_empty_meshes(config.blender, models)
     except (OSError, RuntimeError, ValueError, KeyError) as error:
@@ -79,21 +96,21 @@ def main():
         print(f"Cleared dataset indexes: {index_file}")
 
     failures = 0
-    for model_index, model in enumerate(models):
+    for model_index, (model, model_count) in enumerate(zip(models, curve_counts)):
         model_seed = config.seed + 10_000 * model_index
         run_key = dataset_run_key(config, model, model_seed)
         completed = completed_curve_indices(index_file, run_key, model)
         skip_indices = tuple(
-            curve_index for curve_index in completed if curve_index < config.count
+            curve_index for curve_index in completed if curve_index < model_count
         )
-        if len(skip_indices) == config.count:
-            print(f"SKIP {model.name}: all {config.count} curve indexes are complete")
+        if len(skip_indices) == model_count:
+            print(f"SKIP {model.name}: all {model_count} curve indexes are complete")
             continue
         returncode = run_blender(
             blender_command(
                 config,
                 model,
-                count=config.count,
+                count=model_count,
                 seed=model_seed,
                 output_dir=config.output_dir,
                 device=config.device,
@@ -109,7 +126,10 @@ def main():
     if failures:
         print(f"Completed with {failures} failed model runs.", file=sys.stderr)
         return 1
-    print(f"Dataset indexes are up to date for {len(models)} models in {config.output_dir}")
+    print(
+        f"Dataset indexes are up to date for {config.count} curves across "
+        f"{len(models)} models in {config.output_dir}"
+    )
     return 0
 
 

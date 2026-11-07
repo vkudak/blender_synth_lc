@@ -15,6 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 def test_dataset_config_loads_precession_settings():
     config = load_config(PROJECT_ROOT / "config" / "dataset.ini", kind="dataset")
 
+    assert config.count == 10_000
     assert config.precession_angle_deg == 0.0
     assert config.precession_period_s == 60.0
     assert config.precession_phase_deg == 0.0
@@ -23,6 +24,26 @@ def test_dataset_config_loads_precession_settings():
     assert config.precession_angle_max_deg == 30.0
     assert config.precession_period_min_s == 20.0
     assert config.precession_period_max_s == 180.0
+
+
+@pytest.mark.parametrize("value", ("0", "-1"))
+def test_invalid_dataset_total_curves_are_rejected(tmp_path, value):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(source.replace("total_curves = 10000", f"total_curves = {value}"), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="count/total_curves must be at least 1"):
+        load_config(config_path, kind="dataset")
+
+
+def test_legacy_curves_per_model_setting_requires_migration(tmp_path):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    source = source.replace("total_curves = 10000", "curves_per_model = 2")
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(source, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="use dataset.total_curves"):
+        load_config(config_path, kind="dataset")
 
 
 def test_dataset_precession_fraction_defaults_to_half(tmp_path):

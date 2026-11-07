@@ -6,6 +6,62 @@ from blender_synth_lc.config import PROJECT_ROOT, load_config
 from blender_synth_lc.jobs import record_completed_curve
 
 
+def test_distribute_curve_counts_is_even_and_totals_exactly():
+    counts = generate_dataset.distribute_curve_counts(10_000, 11)
+
+    assert sum(counts) == 10_000
+    assert max(counts) - min(counts) == 1
+    assert counts == (910,) + (909,) * 10
+
+
+def test_distribute_curve_counts_requires_at_least_one_per_model():
+    try:
+        generate_dataset.distribute_curve_counts(2, 3)
+    except ValueError as error:
+        assert "at least the number of selected models" in str(error)
+    else:
+        raise AssertionError("Expected ValueError when curves cannot cover all models")
+
+
+def test_dataset_runner_passes_even_total_allocation_to_models(tmp_path, monkeypatch):
+    models = tuple(tmp_path / f"model_{index}.blend" for index in range(3))
+    for model in models:
+        model.touch()
+    blender = tmp_path / "blender"
+    blender.touch()
+    config = load_config(PROJECT_ROOT / "config" / "dataset.ini", kind="dataset")
+    config = replace(
+        config,
+        blender=blender,
+        models_dir=tmp_path,
+        output_dir=tmp_path / "dataset",
+        count=10,
+        device="cpu",
+    )
+    allocated_counts = []
+
+    monkeypatch.setattr(generate_dataset, "load_config", lambda *args, **kwargs: config)
+    monkeypatch.setattr(
+        generate_dataset, "apply_overrides", lambda config, **kwargs: config
+    )
+    monkeypatch.setattr(generate_dataset, "usable_models", lambda config: models)
+    monkeypatch.setattr(generate_dataset, "find_empty_meshes", lambda *args: ())
+    monkeypatch.setattr(
+        generate_dataset,
+        "blender_command",
+        lambda config, model, **kwargs: allocated_counts.append(kwargs["count"]) or [],
+    )
+    monkeypatch.setattr(generate_dataset, "run_blender", lambda command: 0)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["generate_dataset.py", "--config", "dataset.ini", "--total-curves", "10"],
+    )
+
+    assert generate_dataset.main() == 0
+    assert allocated_counts == [4, 3, 3]
+
+
 def test_dataset_runner_resumes_and_force_indexes_restarts(tmp_path, monkeypatch):
     model = tmp_path / "model.blend"
     model.touch()

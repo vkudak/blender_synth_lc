@@ -82,7 +82,7 @@ Edit `config/dataset.ini`, then run:
 ```text
 --model NAME         Select a model; repeat to select multiple models
 --output-dir PATH    Override [paths] output_dir
---curves-per-model N Override [dataset] curves_per_model
+--total-curves N     Override [dataset] total_curves (default 10000)
 --seed INTEGER       Override [run] seed
 --device DEVICE      auto, cpu, cuda, or optix
 ```
@@ -93,16 +93,16 @@ Example smoke run:
 .venv/bin/python scripts/generate_dataset.py \
   --config config/dataset.ini \
   --model Lotos_model.blend \
-  --curves-per-model 1 \
+  --total-curves 1 \
   --output-dir reports/dataset_smoke \
   --device cpu
 ```
 
 If `[paths] models` is empty, every `.blend` in `models_dir` is selected except entries in `skip_models`. If it is non-empty, it is an explicit comma-separated selection. CLI `--model` values are names resolved under `models_dir` (unless an absolute path is supplied); the option may be repeated. Before rendering, dataset generation inspects every selected model with Blender. If any mesh object has zero evaluated vertices, it warns with the model and object names and stops before creating the output directory or rendering; the user must repair or remove the affected model. Dataset filenames contain the model stem, seed, zero-based curve index, and a unique random token; the index restarts for each model. Each curve also has JSON and SVG sidecars.
 
-Dataset runs are resumable. The output directory contains a hidden `.dataset_indexes.jsonl` journal that records each curve index only after its CSV, JSON, and SVG have been written. Re-running with the same settings, models, and seed skips recorded curves and continues missing indexes. Increasing `curves_per_model` continues at the new indexes. A changed configuration, model file, or seed gets a separate index entry. Use `--force_indexes` (or `--force-indexes`) to delete the saved indexes and regenerate all requested curves. This removes only the index file; existing outputs are kept, and regenerated curves get new filenames.
+Dataset runs are resumable. The output directory contains a hidden `.dataset_indexes.jsonl` journal that records each curve index only after its CSV, JSON, and SVG have been written. Re-running with the same settings, models, and seed skips recorded curves and continues missing indexes. Increasing `total_curves` continues at the new indexes. A changed configuration, model file, or seed gets a separate index entry. Use `--force_indexes` (or `--force-indexes`) to delete the saved indexes and regenerate all requested curves. This removes only the index file; existing outputs are kept, and regenerated curves get new filenames.
 
-The total requested curve count is the number of selected models multiplied by `curves_per_model`. A model's base seed is offset by 10,000 for each model in the selection; the curve index is added within that model.
+`total_curves` is the total number of curves across all selected models. The runner divides this total as evenly as possible; model counts differ by at most one, with any remainder assigned to the first models in selection order. Automatically discovered models are sorted by filename. The total must be at least the number of selected models so every model receives at least one curve. A model's base seed is offset by 10,000 for each model in the selection; the curve index is added within that model.
 
 ## Configuration Reference
 
@@ -190,7 +190,7 @@ The render uses Cycles, denoising, AgX, a black background, a close-up orthograp
 
 ### `[dataset]`
 
-- `curves_per_model`: positive integer number of curves generated for every selected model; default `2`.
+- `total_curves`: positive integer target for the entire dataset; default `10000`. Curves are divided evenly among selected models, with any remainder assigned in selection order.
 - `rotating_fraction`: probability of a rotating curve when `[attitude] mode=random`, in `[0, 1]`; default `0.5`. At exactly `0.5`, the renderer alternates static/rotating curves by curve index.
 - `precession_fraction`: probability that a rotating curve has precession, in `[0, 1]`; default `0.5`. Selection is seeded and independent per curve, so the realized fraction can differ, especially in small datasets. Static curves never precess. A zero sampled precession angle also disables precession.
 - `precession_angle_min_deg`, `precession_angle_max_deg`: ordered range in `[0, 180] deg`; example defaults `5` and `30`.
