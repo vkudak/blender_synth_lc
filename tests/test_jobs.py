@@ -1,7 +1,47 @@
 from dataclasses import replace
+import json
+from pathlib import Path
+
+import blender_synth_lc.jobs as jobs
 
 from blender_synth_lc.config import PROJECT_ROOT, load_config
-from blender_synth_lc.jobs import RENDER_SCRIPT, blender_command
+from blender_synth_lc.jobs import (
+    RENDER_SCRIPT,
+    blender_command,
+    clear_dataset_indexes,
+    completed_curve_indices,
+    dataset_index_path,
+    dataset_run_key,
+    find_empty_meshes,
+    record_completed_curve,
+)
+
+
+def test_find_empty_meshes_reports_empty_objects_for_all_selected_models(
+    tmp_path, monkeypatch
+):
+    first_model = tmp_path / "first.blend"
+    second_model = tmp_path / "second.blend"
+    inspected_models = []
+
+    def fake_run(command, **kwargs):
+        model = Path(command[2])
+        inspected_models.append(model)
+        output_path = Path(command[command.index("--output") + 1])
+        objects = (
+            [{"name": "EmptyPanel", "type": "MESH", "mesh_vertices": 0}]
+            if model == first_model
+            else [{"name": "Body", "type": "MESH", "mesh_vertices": 12}]
+        )
+        output_path.write_text(json.dumps({"objects": objects}), encoding="utf-8")
+        return jobs.subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(jobs.subprocess, "run", fake_run)
+
+    invalid_models = find_empty_meshes(Path("/blender"), (first_model, second_model))
+
+    assert inspected_models == [first_model, second_model]
+    assert invalid_models == ((first_model, ("EmptyPanel",)),)
 
 
 def test_blender_command_saves_and_uses_configured_runner(tmp_path):
@@ -14,7 +54,6 @@ def test_blender_command_saves_and_uses_configured_runner(tmp_path):
     )
     config = load_config(config_path, kind="curve")
     assert config.scene_meters_per_unit == 1.0
-    assert config.satellite_size_m == 4.0
     assert config.sun_energy == 1361.0
     assert config.max_eclipse_fraction == 0.15
     assert config.exposure == -8.8
@@ -47,8 +86,65 @@ def test_blender_command_saves_and_uses_configured_runner(tmp_path):
     assert "bmesh.ops.create_uvsphere(" in render_source
     assert "bpy.context.object" not in render_source
     assert "scene.unit_settings.scale_length = args.scene_meters_per_unit" in render_source
+    assert 'load_model_sizes(REPO_ROOT / "models" / "model_sizes.json")' in render_source
+    assert "args.satellite_size_m" not in render_source
     assert "light.location = sun_position - sample_position" in render_source
     assert "scene_units_per_m = 1.0 / args.scene_meters_per_unit" in render_source
     assert 'module_name.startswith("blender_synth_lc.")' in render_source
     assert "runpy" not in render_source
     compile(render_source, str(script_output), "exec")
+
+
+def test_dataset_indexes_record_completed_curves_and_can_be_cleared(tmp_path):
+    model = tmp_path / "model.blend"
+    model.touch()
+    output_dir = tmp_path / "dataset"
+    index_file = dataset_index_path(output_dir)
+    config = load_config(PROJECT_ROOT / "config" / "dataset.ini", kind="dataset")
+    run_key = dataset_run_key(config, model, config.seed)
+
+    record_completed_curve(index_file, run_key, model, 2)
+    record_completed_curve(index_file, run_key, model, 0)
+    record_completed_curve(index_file, run_key, model, 2)
+
+    assert completed_curve_indices(index_file, run_key, model) == (0, 2)
+
+    clear_dataset_indexes(index_file)
+
+    assert completed_curve_indices(index_file, run_key, model) == ()
+
+
+def test_dataset_index_recovers_from_a_truncated_last_record(tmp_path):
+    model = tmp_path / "model.blend"
+    model.touch()
+    index_file = dataset_index_path(tmp_path / "dataset")
+    config = load_config(PROJECT_ROOT / "config" / "dataset.ini", kind="dataset")
+    run_key = dataset_run_key(config, model, config.seed)
+    record_completed_curve(index_file, run_key, model, 0)
+    with index_file.open("a", encoding="utf-8") as output:
+        output.write('{"version":1,"run_key":')
+
+    assert completed_curve_indices(index_file, run_key, model) == (0,)
+
+    record_completed_curve(index_file, run_key, model, 1)
+
+    assert completed_curve_indices(index_file, run_key, model) == (0, 1)
+
+
+def test_dataset_run_key_ignores_requested_count_but_tracks_settings(tmp_path):
+    model = tmp_path / "model.blend"
+    model.touch()
+    config = load_config(PROJECT_ROOT / "config" / "dataset.ini", kind="dataset")
+    changed_count = replace(config, count=config.count + 1)
+    changed_device = replace(config, device="cpu")
+    changed_precession_fraction = replace(config, precession_fraction=1.0)
+
+    assert dataset_run_key(config, model, config.seed) == dataset_run_key(
+        changed_count, model, config.seed
+    )
+    assert dataset_run_key(config, model, config.seed) != dataset_run_key(
+        changed_device, model, config.seed
+    )
+    assert dataset_run_key(config, model, config.seed) != dataset_run_key(
+        changed_precession_fraction, model, config.seed
+    )

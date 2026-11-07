@@ -98,7 +98,9 @@ Example smoke run:
   --device cpu
 ```
 
-If `[paths] models` is empty, every `.blend` in `models_dir` is selected except entries in `skip_models`. If it is non-empty, it is an explicit comma-separated selection. CLI `--model` values are names resolved under `models_dir` (unless an absolute path is supplied); the option may be repeated. Empty-geometry assets fail at render time and should be excluded. Dataset filenames contain the model stem, seed, zero-based curve index, and a unique random token; the index restarts for each model. Each curve also has JSON and SVG sidecars.
+If `[paths] models` is empty, every `.blend` in `models_dir` is selected except entries in `skip_models`. If it is non-empty, it is an explicit comma-separated selection. CLI `--model` values are names resolved under `models_dir` (unless an absolute path is supplied); the option may be repeated. Before rendering, dataset generation inspects every selected model with Blender. If any mesh object has zero evaluated vertices, it warns with the model and object names and stops before creating the output directory or rendering; the user must repair or remove the affected model. Dataset filenames contain the model stem, seed, zero-based curve index, and a unique random token; the index restarts for each model. Each curve also has JSON and SVG sidecars.
+
+Dataset runs are resumable. The output directory contains a hidden `.dataset_indexes.jsonl` journal that records each curve index only after its CSV, JSON, and SVG have been written. Re-running with the same settings, models, and seed skips recorded curves and continues missing indexes. Increasing `curves_per_model` continues at the new indexes. A changed configuration, model file, or seed gets a separate index entry. Use `--force_indexes` (or `--force-indexes`) to delete the saved indexes and regenerate all requested curves. This removes only the index file; existing outputs are kept, and regenerated curves get new filenames.
 
 The total requested curve count is the number of selected models multiplied by `curves_per_model`. A model's base seed is offset by 10,000 for each model in the selection; the curve index is added within that model.
 
@@ -148,10 +150,10 @@ The orbit is circular and propagated with a two-body Earth gravitational paramet
 
 ### `[pass]`
 
-- `duration_s`: requested observation window centered on closest approach; default `60`.
+- `duration_s`: requested observation window centered on the orbit epoch; default `60`. The epoch is closest approach when the orbit is aligned.
 - `cadence_s`: time between samples; default `10`. The duration must be an integer multiple of cadence, and at least one interval is required. The initial sampling grid contains `duration / cadence + 1` points.
-- `minimum_elevation_deg`: observer elevation mask in `[0, 90)`; default `10`. The selected curve uses the longest consecutive segment above the mask and must contain at least two samples. Consequently, the retained pass duration can be shorter than requested.
-- `max_attempts`: maximum random orbit candidates to try; default `1000`. Relevant to random orbit generation; failure suggests lowering the elevation mask or increasing this value.
+- `minimum_elevation_deg`: satellite-center elevation mask in `[10, 90)`; default `20`. Values below `10` emit a warning and are clamped to `10`. The selected curve uses the longest consecutive segment above the mask and must retain at least 85% of the requested samples (at most 15% may be trimmed). Otherwise the whole curve is rejected. Fixed configurations fail; random orbit generation retries candidates. Retained pass duration may be up to 15% shorter than requested.
+- `max_attempts`: maximum random orbit candidates to try; default `1000`. Candidates must clear the elevation mask at closest approach and retain at least 85% of the requested sample grid. Failure suggests lowering the elevation mask, shortening the duration, or increasing this value.
 
 ### `[attitude]`
 
@@ -174,7 +176,7 @@ Precession applies only to rotating curves. Dataset runs instead sample the angl
 - `energy`: Sun irradiance in `W/m^2`; the example uses `1361`, approximately solar irradiance at 1 AU. This controls the Blender Sun light energy.
 - `max_eclipse_fraction`: maximum fraction of retained pass samples that may be eclipsed; default `0.15`, valid in `[0, 1)`. A vector mode exceeding the limit is rejected; random mode resamples a direction.
 
-Earth occultation uses a cylindrical shadow: samples behind Earth and within the Earth-radius shadow cylinder are marked eclipsed and assigned zero flux.
+Earth occultation uses a conical shadow with the finite angular disk of the Sun. Samples in either umbra or penumbra count toward `max_eclipse_fraction`; umbra samples have zero flux, while penumbra samples are rendered and their flux is scaled by the visible fraction of the solar disk. CSV rows report `shadow_state` (`sunlit`, `penumbra`, or `umbra`) and `solar_illumination_fraction` in addition to the backward-compatible `eclipsed` flag. The synthetic Earth does not cast a separate directional-light shadow in Blender; its occultation is represented by this per-sample solar-disk fraction.
 
 ### `[render]`
 
@@ -182,15 +184,15 @@ Earth occultation uses a cylindrical shadow: samples behind Earth and within the
 - `samples`: Cycles samples per rendered frame; default `8`.
 - `exposure`: Blender exposure in EV; default `-8.8`. Adjust for model materials and highlights.
 - `scene_meters_per_unit`: physical meters represented by one Blender unit; default `1`, must be positive.
-- `satellite_size_m`: target length in meters of the model's longest bounding-box dimension after uniform scaling; default `4`, must be positive. Geometry is centered and scaled to this size while the satellite root remains at the local origin.
 - `script_output`: optional path for a saved renderer script; empty means use the normal renderer entry point.
 
-The render uses Cycles, denoising, AgX, a black background, a close-up orthographic camera, and a Sun light. Existing cameras and lights in the model are hidden from rendering.
+The render uses Cycles, denoising, AgX, a black background, a close-up orthographic camera, and a Sun light. Existing cameras and lights in the model are hidden from rendering. Per-model physical dimensions can be configured in `models/model_sizes.json`; unlisted models are used at their native Blender bounds, assumed to already be correct.
 
 ### `[dataset]`
 
 - `curves_per_model`: positive integer number of curves generated for every selected model; default `2`.
 - `rotating_fraction`: probability of a rotating curve when `[attitude] mode=random`, in `[0, 1]`; default `0.5`. At exactly `0.5`, the renderer alternates static/rotating curves by curve index.
+- `precession_fraction`: probability that a rotating curve has precession, in `[0, 1]`; default `0.5`. Selection is seeded and independent per curve, so the realized fraction can differ, especially in small datasets. Static curves never precess. A zero sampled precession angle also disables precession.
 - `precession_angle_min_deg`, `precession_angle_max_deg`: ordered range in `[0, 180] deg`; example defaults `5` and `30`.
 - `precession_period_min_s`, `precession_period_max_s`: ordered positive period range in seconds; example defaults `20` and `180`.
 
@@ -206,21 +208,33 @@ The render uses Cycles, denoising, AgX, a black background, a close-up orthograp
 
 Unlisted models use all three axes. These are Blender scene axes; selection is made for each curve using its seeded random generator.
 
+`models/model_sizes.json` optionally defines calibrated final dimensions in meters for each model, measured along its original Blender scene X/Y/Z axes. Each dimension must be positive. The renderer scales the model independently along each axis to reach these dimensions. For example:
+
+```json
+{
+  "Topex_good.blend": {
+    "dimensions_m": {"x": 4.0, "y": 2.0, "z": 1.5}
+  }
+}
+```
+
+If a model is not listed, its native bounds are left unchanged and treated as already correct. `scene_meters_per_unit` converts those native Blender units to meters. The JSON sidecar records the resulting dimensions, axis scale factors, and whether values came from this calibration file or native bounds.
+
 ## Coordinate System and Scenario Model
 
 The orbit and ground-site calculations use Cartesian coordinates in meters with a common Earth-centered reference frame. The orbit propagation is ECI-like: the `XY` plane is the equatorial plane, `+Z` is the north-pole direction, and the orbit is first parameterized in its plane, then rotated by inclination and RAAN. At the orbit epoch, `phase_deg` sets the satellite's angle in that plane. Circular-orbit position and velocity are propagated from mean motion derived from Earth gravitational parameter and radius.
 
-The observer's latitude and longitude are geodetic WGS-84 coordinates converted to Earth-fixed Cartesian coordinates. The local horizon basis defines azimuth clockwise from north and elevation above the horizon. For simplicity, Earth rotation is ignored during a pass: the observer remains fixed and the orbit coordinates are compared directly against that fixed site. This is a simplified shared frame, not a full Earth-orientation transformation.
+The observer's latitude and longitude are geodetic WGS-84 coordinates converted to Earth-fixed Cartesian coordinates. At the orbit epoch (`t=0`), the Earth-fixed and inertial axes coincide; at other times, the observer and local horizon rotate eastward around `+Z` with a constant sidereal period of 86,164.0905 seconds. Azimuth is clockwise from north and elevation is above the rotating horizon. Pass alignment accounts for the observer's rotational velocity so the range is locally minimal at the epoch. This relative epoch convention does not use UTC, Greenwich sidereal time, polar motion, or a full Earth-orientation transformation; RAAN and Sun direction are specified in the same epoch frame, not tied to an actual observation date.
 
-Blender uses a satellite-centered rendering scene for numerical precision. The satellite root stays at the origin; at each sample, Earth, the observer marker, and the Sun are positioned relative to the satellite. The camera is placed in the observer-to-satellite direction and tracks the satellite center, but does not rotate with the spacecraft body. `scene_meters_per_unit` converts physical distances to Blender units. The model's longest combined mesh-bounds dimension is uniformly scaled to `satellite_size_m`.
+Blender uses a satellite-centered rendering scene for numerical precision. The satellite root stays at the origin; at each sample, Earth, the observer marker, and the Sun are positioned relative to the satellite. The camera is placed in the observer-to-satellite direction and tracks the satellite center, but does not rotate with the spacecraft body. `scene_meters_per_unit` converts physical distances to Blender units. If a model has a `dimensions_m` entry in `models/model_sizes.json`, its combined mesh bounds are scaled independently along X/Y/Z; otherwise its native bounds are retained.
 
 ## How a Light Curve Is Generated
 
 1. The renderer initializes a seeded random generator for the curve and chooses fixed or random observer and attitude parameters.
-2. It creates a circular orbit. Random mode samples altitude, inclination, RAAN, and phase, then aligns candidates to closest approach and retries until the elevation mask is met. Fixed mode either aligns phase or uses the configured phase according to `align_for_pass`.
-3. The requested time window is sampled symmetrically around the orbit epoch (`t=0`), which is closest approach when the orbit is aligned. Samples below the elevation mask are removed by selecting the longest consecutive visible segment.
+2. It creates a circular orbit. Random mode samples altitude, inclination, RAAN, and phase, then retries candidates until closest approach clears the elevation mask and the longest consecutive visible segment retains at least 85% of the requested samples. Fixed mode either aligns phase or uses the configured phase according to `align_for_pass`; it fails if the retained segment is shorter than this limit.
+3. The requested time window is sampled symmetrically around the orbit epoch (`t=0`), which is closest approach when the orbit is aligned. Samples below the elevation mask are removed by selecting the longest consecutive visible segment. Trimming exactly 15% is accepted; trimming more rejects the whole curve.
 4. A Sun direction is selected. Random directions are sampled over the sphere; vector mode uses the configured vector. Directions are rejected if the retained pass exceeds the allowed eclipse fraction.
-5. The loaded spacecraft mesh objects are centered under a common root and scaled. For each non-eclipsed sample, the root attitude is updated, the camera observes from the current line of sight, and Blender renders an OpenEXR frame. Eclipsed samples are recorded with zero flux without rendering.
+5. The loaded spacecraft mesh objects are centered under a common root and scaled. For each sample outside the umbra, the root attitude is updated, the camera observes from the current line of sight, and Blender renders an OpenEXR frame. Penumbra flux is scaled by the visible solar-disk fraction; umbra samples are recorded with zero flux without rendering.
 6. The renderer sums linear RGB values across rendered pixels. It applies the inverse-square range correction relative to the first retained sample, then divides by the maximum corrected value to obtain `relative_flux` in `[0, 1]`.
 7. CSV data, JSON scenario/render metadata, and an SVG plot are written together.
 
@@ -233,14 +247,16 @@ The CSV columns are:
 - `time_from_start_s`: seconds from the first retained sample.
 - `range_m`, `azimuth_deg`, `elevation_deg`: observer geometry at that sample.
 - `visible`: visibility-mask flag (`0` or `1`); retained rows are expected to be visible.
-- `eclipsed`: cylindrical Earth-shadow flag (`0` or `1`).
+- `eclipsed`: flag (`0` or `1`) set for both penumbra and umbra samples.
+- `shadow_state`: `sunlit`, `penumbra`, or `umbra` for the sample.
+- `solar_illumination_fraction`: visible fraction of the solar disk, from `0` in umbra to `1` in full sunlight.
 - `render_flux_linear_rgb`: sum of linear RGB render pixels before range correction.
 - `flux_with_range_correction`: raw render flux multiplied by `(reference_range / current_range)^2`.
 - `relative_flux`: corrected flux normalized to the largest value in the curve.
 
 The JSON sidecar records the model, seed, observer, orbit, retained pass, attitude/precession, Blender version/device/render settings, eclipse fraction, and limitations. The SVG displays normalized relative flux against time.
 
-These values are a rendering-based relative-flux proxy, not calibrated magnitude or absolute photometry. Current limitations include uncalibrated physical model dimensions/material reflectance, no atmosphere, cylindrical rather than conical shadow, circular two-body orbits, and no Earth rotation. Physical-scale asset calibration and large GPU dataset runs remain follow-up work.
+These values are a rendering-based relative-flux proxy, not calibrated magnitude or absolute photometry. Models absent from `models/model_sizes.json` are assumed to have correct native physical dimensions; material reflectance remains uncalibrated. Other limitations include no atmosphere, uniform scaling of the rendered flux by the visible solar-disk fraction in penumbra, circular two-body orbits, and a simplified Earth-orientation model. Per-model physical dimensions still need to be supplied and validated for calibrated assets.
 
 ## Audit Blender Models
 

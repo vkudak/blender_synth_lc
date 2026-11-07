@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from math import acos, atan2, cos, degrees, hypot, isfinite, radians, sin, sqrt
+from math import acos, atan2, cos, degrees, hypot, isfinite, radians, sin, sqrt, tau
 from random import Random
 
 
@@ -7,8 +7,12 @@ EARTH_MU_M3_S2 = 3.986004418e14
 EARTH_EQUATORIAL_RADIUS_M = 6_378_137.0
 EARTH_FLATTENING = 1.0 / 298.257223563
 EARTH_ECCENTRICITY_SQUARED = EARTH_FLATTENING * (2.0 - EARTH_FLATTENING)
+EARTH_ROTATION_RATE_RAD_S = tau / 86164.0905
 MIN_ORBIT_ALTITUDE_M = 300_000.0
 MAX_ORBIT_ALTITUDE_M = 3_000_000.0
+DEFAULT_MINIMUM_ELEVATION_DEG = 20.0
+MINIMUM_ELEVATION_FLOOR_DEG = 10.0
+MAX_TRIMMED_SAMPLE_FRACTION = 0.15
 
 Vector3 = tuple[float, float, float]
 
@@ -55,8 +59,6 @@ class CircularOrbit:
 
     @property
     def period_s(self) -> float:
-        from math import tau
-
         return tau / self.mean_motion_rad_s
 
     def position_velocity_eci(self, time_s: float) -> tuple[Vector3, Vector3]:
@@ -138,6 +140,22 @@ def longest_visible_window(samples: tuple[PassSample, ...]) -> tuple[PassSample,
     )
 
 
+def select_visible_window(
+    samples: tuple[PassSample, ...],
+    max_trimmed_fraction: float = MAX_TRIMMED_SAMPLE_FRACTION,
+) -> tuple[PassSample, ...] | None:
+    if not isfinite(max_trimmed_fraction) or not 0.0 <= max_trimmed_fraction <= 1.0:
+        raise ValueError("max_trimmed_fraction must be finite and in [0, 1]")
+    if not samples:
+        return None
+
+    window = longest_visible_window(samples)
+    trimmed_fraction = (len(samples) - len(window)) / len(samples)
+    if len(window) < 2 or trimmed_fraction > max_trimmed_fraction:
+        return None
+    return window
+
+
 def sample_ground_observer(rng: Random, altitude_m: float = 0.0) -> GroundObserver:
     """Sample a point uniformly by area on a spherical latitude/longitude grid."""
     latitude = degrees(asin_clamped(2.0 * rng.random() - 1.0))
@@ -179,14 +197,25 @@ def observer_position_fixed_frame(observer: GroundObserver) -> Vector3:
     return observer_position_ecef(observer)
 
 
+def observer_position_eci(observer: GroundObserver, time_s: float) -> Vector3:
+    """Return the rotating ground site in the inertial epoch frame, in meters."""
+    x_ecef, y_ecef, z_ecef = observer_position_ecef(observer)
+    angle = EARTH_ROTATION_RATE_RAD_S * time_s
+    return (
+        cos(angle) * x_ecef - sin(angle) * y_ecef,
+        sin(angle) * x_ecef + cos(angle) * y_ecef,
+        z_ecef,
+    )
+
+
 def look_angles(
     orbit: CircularOrbit,
     observer: GroundObserver,
     time_s: float,
 ) -> tuple[float, float, float]:
-    """Return azimuth, elevation, and range while Earth rotation is ignored."""
+    """Return azimuth, elevation, and range from the rotating ground site."""
     satellite, _ = orbit.position_velocity_eci(time_s)
-    observer_position = observer_position_fixed_frame(observer)
+    observer_position = observer_position_eci(observer, time_s)
     line_of_sight = tuple(
         satellite[axis] - observer_position[axis] for axis in range(3)
     )
@@ -195,7 +224,7 @@ def look_angles(
         raise ValueError("observer and satellite positions cannot coincide")
 
     latitude = radians(observer.latitude_deg)
-    longitude = radians(observer.longitude_deg)
+    longitude = radians(observer.longitude_deg) + EARTH_ROTATION_RATE_RAD_S * time_s
     east_ecef = (-sin(longitude), cos(longitude), 0.0)
     north_ecef = (
         -sin(latitude) * cos(longitude),
@@ -242,9 +271,9 @@ def sample_circular_orbit(
 def align_orbit_for_pass(
     orbit: CircularOrbit,
     observer: GroundObserver,
-    minimum_elevation_deg: float = 10.0,
+    minimum_elevation_deg: float = DEFAULT_MINIMUM_ELEVATION_DEG,
 ) -> VisiblePass | None:
-    """Set phase so the orbit reaches its closest point to a fixed ground site."""
+    """Set phase so the orbit reaches its closest point to the moving ground site."""
     if not isfinite(minimum_elevation_deg) or not 0.0 <= minimum_elevation_deg < 90.0:
         raise ValueError("minimum_elevation_deg must be finite and in [0, 90)")
 
@@ -273,9 +302,18 @@ def align_orbit_for_pass(
         cos(raan) * cos(inclination),
         sin(inclination),
     )
+    site_velocity = (
+        -EARTH_ROTATION_RATE_RAD_S * site_position[1],
+        EARTH_ROTATION_RATE_RAD_S * site_position[0],
+        0.0,
+    )
+    first_position = sum(site_position[i] * first_axis[i] for i in range(3))
+    second_position = sum(site_position[i] * second_axis[i] for i in range(3))
+    first_velocity = sum(site_velocity[i] * first_axis[i] for i in range(3))
+    second_velocity = sum(site_velocity[i] * second_axis[i] for i in range(3))
     phase = atan2(
-        sum(site_projection[i] * second_axis[i] for i in range(3)),
-        sum(site_projection[i] * first_axis[i] for i in range(3)),
+        orbit.mean_motion_rad_s * second_position + first_velocity,
+        orbit.mean_motion_rad_s * first_position - second_velocity,
     )
     aligned_orbit = CircularOrbit(
         altitude_m=orbit.altitude_m,
@@ -298,16 +336,23 @@ def align_orbit_for_pass(
 def sample_visible_pass(
     rng: Random,
     observer: GroundObserver,
-    minimum_elevation_deg: float = 10.0,
+    minimum_elevation_deg: float = DEFAULT_MINIMUM_ELEVATION_DEG,
     max_attempts: int = 100,
     altitude_min_m: float = MIN_ORBIT_ALTITUDE_M,
     altitude_max_m: float = MAX_ORBIT_ALTITUDE_M,
     inclination_min_deg: float = 0.0,
     inclination_max_deg: float = 180.0,
+    duration_s: float | None = None,
+    cadence_s: float | None = None,
+    max_trimmed_fraction: float = MAX_TRIMMED_SAMPLE_FRACTION,
 ) -> VisiblePass:
-    """Sample a circular orbit whose closest approach clears the elevation mask."""
+    """Sample an orbit whose closest approach and retained pass clear the mask."""
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least one")
+    if (duration_s is None) != (cadence_s is None):
+        raise ValueError("duration_s and cadence_s must be provided together")
+    if not isfinite(max_trimmed_fraction) or not 0.0 <= max_trimmed_fraction <= 1.0:
+        raise ValueError("max_trimmed_fraction must be finite and in [0, 1]")
 
     for _ in range(max_attempts):
         candidate = align_orbit_for_pass(
@@ -321,9 +366,26 @@ def sample_visible_pass(
             observer,
             minimum_elevation_deg,
         )
-        if candidate is not None:
-            return candidate
+        if candidate is None:
+            continue
+        if duration_s is not None:
+            samples = sample_pass_window(
+                candidate,
+                observer,
+                duration_s=duration_s,
+                cadence_s=cadence_s,
+            )
+            if select_visible_window(samples, max_trimmed_fraction) is None:
+                continue
+        return candidate
 
+    if duration_s is not None:
+        minimum_retained_percent = (1.0 - max_trimmed_fraction) * 100.0
+        raise RuntimeError(
+            f"No pass retained at least {minimum_retained_percent:g}% of requested "
+            f"samples after {max_attempts} orbit samples; lower the elevation mask, "
+            "shorten the duration, or increase max_attempts"
+        )
     raise RuntimeError(
         f"No visible pass found after {max_attempts} orbit samples; "
         "lower the elevation mask or increase max_attempts"

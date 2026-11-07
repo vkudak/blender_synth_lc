@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import configparser
+import json
 from dataclasses import dataclass, replace
 from math import isfinite
 from pathlib import Path
+import warnings
 
 from . import MIN_ROTATION_PERIOD_S, ROTATION_PERIOD_CUTOFF_S
-from .orbit import MAX_ORBIT_ALTITUDE_M, MIN_ORBIT_ALTITUDE_M
+from .orbit import (
+    DEFAULT_MINIMUM_ELEVATION_DEG,
+    MAX_ORBIT_ALTITUDE_M,
+    MINIMUM_ELEVATION_FLOOR_DEG,
+    MIN_ORBIT_ALTITUDE_M,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -59,6 +66,7 @@ class SynthConfig:
     precession_angle_deg: float
     precession_period_s: float
     precession_phase_deg: float
+    precession_fraction: float
     precession_angle_min_deg: float
     precession_angle_max_deg: float
     precession_period_min_s: float
@@ -72,7 +80,6 @@ class SynthConfig:
     exposure: float
     script_output: Path | None
     scene_meters_per_unit: float
-    satellite_size_m: float
 
 
 def load_config(path: Path, kind: str) -> SynthConfig:
@@ -120,12 +127,9 @@ def load_config(path: Path, kind: str) -> SynthConfig:
         _resolve_path(script_output_value, config_path) if script_output_value else None
     )
     scene_meters_per_unit = getfloat("render", "scene_meters_per_unit", 1.0)
-    satellite_size_m = getfloat("render", "satellite_size_m", 4.0)
     max_eclipse_fraction = getfloat("sun", "max_eclipse_fraction", 0.15)
     if scene_meters_per_unit <= 0.0:
         raise ValueError("render.scene_meters_per_unit must be positive")
-    if satellite_size_m <= 0.0:
-        raise ValueError("render.satellite_size_m must be positive")
     if not 0.0 <= max_eclipse_fraction < 1.0:
         raise ValueError("sun.max_eclipse_fraction must be in [0, 1)")
     selected_models = _split_list(get("paths", "models", fallback=""))
@@ -213,13 +217,32 @@ def load_config(path: Path, kind: str) -> SynthConfig:
 
     count = 1
     rotating_fraction = getfloat("attitude", "rotating_fraction", 0.5)
+    precession_fraction = 1.0
     if kind == "dataset":
         count = parser.getint("dataset", "curves_per_model", fallback=2)
         rotating_fraction = parser.getfloat("dataset", "rotating_fraction", fallback=rotating_fraction)
+        precession_fraction = parser.getfloat("dataset", "precession_fraction", fallback=0.5)
     if count < 1:
         raise ValueError("count/curves_per_model must be at least 1")
     if not 0.0 <= rotating_fraction <= 1.0:
         raise ValueError("rotating_fraction must be in [0, 1]")
+    if not 0.0 <= precession_fraction <= 1.0:
+        raise ValueError("dataset.precession_fraction must be in [0, 1]")
+
+    minimum_elevation_deg = getfloat(
+        "pass", "minimum_elevation_deg", DEFAULT_MINIMUM_ELEVATION_DEG
+    )
+    if not isfinite(minimum_elevation_deg) or minimum_elevation_deg >= 90.0:
+        raise ValueError("pass.minimum_elevation_deg must be finite and in [0, 90)")
+    if minimum_elevation_deg < MINIMUM_ELEVATION_FLOOR_DEG:
+        warnings.warn(
+            f"pass.minimum_elevation_deg={minimum_elevation_deg:g} is below "
+            f"{MINIMUM_ELEVATION_FLOOR_DEG:g} degrees; using "
+            f"{MINIMUM_ELEVATION_FLOOR_DEG:g} degrees",
+            UserWarning,
+            stacklevel=2,
+        )
+        minimum_elevation_deg = MINIMUM_ELEVATION_FLOOR_DEG
 
     config = SynthConfig(
         kind=kind,
@@ -250,7 +273,7 @@ def load_config(path: Path, kind: str) -> SynthConfig:
         align_for_pass=getbool("orbit", "align_for_pass", True),
         duration_s=getfloat("pass", "duration_s", 60.0),
         cadence_s=getfloat("pass", "cadence_s", 10.0),
-        minimum_elevation_deg=getfloat("pass", "minimum_elevation_deg", 10.0),
+        minimum_elevation_deg=minimum_elevation_deg,
         max_pass_attempts=getint("pass", "max_attempts", 1000),
         attitude_mode=attitude_mode,
         spin_period_s=getfloat("attitude", "spin_period_s", 20.0),
@@ -262,6 +285,7 @@ def load_config(path: Path, kind: str) -> SynthConfig:
         precession_angle_deg=precession_angle_deg,
         precession_period_s=precession_period_s,
         precession_phase_deg=precession_phase_deg,
+        precession_fraction=precession_fraction,
         precession_angle_min_deg=precession_angle_min_deg,
         precession_angle_max_deg=precession_angle_max_deg,
         precession_period_min_s=precession_period_min_s,
@@ -279,11 +303,82 @@ def load_config(path: Path, kind: str) -> SynthConfig:
         exposure=getfloat("render", "exposure", -8.8),
         script_output=script_output,
         scene_meters_per_unit=scene_meters_per_unit,
-        satellite_size_m=satellite_size_m,
     )
     if kind == "curve" and config.model is None:
         raise ValueError("curve config requires paths.model")
     return config
+
+
+def load_model_sizes(path: Path) -> dict[str, tuple[float, float, float]]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("model sizes config must be a JSON object")
+
+    model_sizes = {}
+    for model_name, model_config in data.items():
+        if not isinstance(model_config, dict):
+            raise ValueError(f"size config for {model_name!r} must be an object")
+        dimensions = model_config.get("dimensions_m")
+        if not isinstance(dimensions, dict) or set(dimensions) != {"x", "y", "z"}:
+            raise ValueError(
+                f"dimensions_m for {model_name!r} must define exactly x, y, and z"
+            )
+        values = tuple(dimensions[axis] for axis in ("x", "y", "z"))
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not isfinite(value)
+            or value <= 0.0
+            for value in values
+        ):
+            raise ValueError(
+                f"dimensions_m for {model_name!r} must contain positive finite meters"
+            )
+        model_sizes[model_name] = tuple(float(value) for value in values)
+    return model_sizes
+
+
+def model_axis_scale_factors(
+    source_dimensions: tuple[float, float, float],
+    target_dimensions_m: tuple[float, float, float],
+    scene_meters_per_unit: float,
+) -> tuple[float, float, float]:
+    if not isfinite(scene_meters_per_unit) or scene_meters_per_unit <= 0.0:
+        raise ValueError("scene_meters_per_unit must be finite and positive")
+    if any(not isfinite(value) or value <= 0.0 for value in source_dimensions):
+        raise ValueError("source model dimensions must be finite and positive on all axes")
+    if any(not isfinite(value) or value <= 0.0 for value in target_dimensions_m):
+        raise ValueError("target model dimensions must be finite and positive on all axes")
+    return tuple(
+        target_m / (source_units * scene_meters_per_unit)
+        for source_units, target_m in zip(source_dimensions, target_dimensions_m)
+    )
+
+
+def resolve_model_dimensions(
+    model_name: str,
+    source_dimensions: tuple[float, float, float],
+    model_sizes: dict[str, tuple[float, float, float]],
+    scene_meters_per_unit: float,
+) -> tuple[tuple[float, float, float], tuple[float, float, float], bool]:
+    if not isfinite(scene_meters_per_unit) or scene_meters_per_unit <= 0.0:
+        raise ValueError("scene_meters_per_unit must be finite and positive")
+    if any(not isfinite(value) or value < 0.0 for value in source_dimensions):
+        raise ValueError("source model dimensions must be finite and non-negative")
+
+    target_dimensions_m = model_sizes.get(model_name)
+    if target_dimensions_m is None:
+        return (
+            (1.0, 1.0, 1.0),
+            tuple(value * scene_meters_per_unit for value in source_dimensions),
+            False,
+        )
+    scale_factors = model_axis_scale_factors(
+        source_dimensions,
+        target_dimensions_m,
+        scene_meters_per_unit,
+    )
+    return scale_factors, target_dimensions_m, True
 
 
 def apply_overrides(config: SynthConfig, **overrides) -> SynthConfig:

@@ -112,8 +112,11 @@ def sample_precession_parameters(
     angle_max_deg: float,
     period_min_s: float,
     period_max_s: float,
+    precession_fraction: float = 1.0,
 ) -> tuple[float, float, float]:
-    if not rotating:
+    if not rotating or precession_fraction <= 0.0:
+        return 0.0, 0.0, 0.0
+    if precession_fraction < 1.0 and rng.random() >= precession_fraction:
         return 0.0, 0.0, 0.0
     angle_deg = rng.uniform(angle_min_deg, angle_max_deg)
     period_s = rng.uniform(period_min_s, period_max_s)

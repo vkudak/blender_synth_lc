@@ -9,7 +9,7 @@ import random
 import secrets
 import sys
 import tempfile
-from math import degrees, radians, tau
+from math import degrees, radians, sqrt, tau
 from pathlib import Path
 from xml.etree import ElementTree as ET
 
@@ -20,7 +20,6 @@ from mathutils import Quaternion, Vector
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EARTH_RADIUS_M = 6_371_000.0
-SUN_DISTANCE_M = 149_597_870_700.0
 sys.path.insert(0, str(REPO_ROOT / "src"))
 for module_name in tuple(sys.modules):
     if module_name == "blender_synth_lc" or module_name.startswith("blender_synth_lc."):
@@ -36,21 +35,33 @@ from blender_synth_lc.attitude import (
     spin_phase_rad,
 )
 from blender_synth_lc.illumination import (
+    PENUMBRA,
+    SUN_DISTANCE_M,
+    SUNLIT,
+    UMBRA,
     eclipse_fraction,
-    is_eclipsed,
     sample_sun_direction,
+    shadow_state,
+    solar_illumination_fraction,
 )
 from blender_synth_lc.orbit import (
     CircularOrbit,
+    MAX_TRIMMED_SAMPLE_FRACTION,
     GroundObserver,
     align_orbit_for_pass,
-    longest_visible_window,
-    observer_position_fixed_frame,
+    observer_position_eci,
+    select_visible_window,
     sample_ground_observer,
     sample_pass_window,
     sample_visible_pass,
 )
-from blender_synth_lc.config import apply_overrides, load_config
+from blender_synth_lc.config import (
+    apply_overrides,
+    load_config,
+    load_model_sizes,
+    resolve_model_dimensions,
+)
+from blender_synth_lc.jobs import record_completed_curve
 
 
 def parse_args():
@@ -64,9 +75,16 @@ def parse_args():
     parser.add_argument("--count", type=int, required=True)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda", "optix"), required=True)
+    parser.add_argument("--skip-index", type=int, action="append", default=[])
+    parser.add_argument("--index-file", type=Path)
+    parser.add_argument("--index-run-key")
     cli_args = parser.parse_args(blender_args)
     if cli_args.count < 1:
         parser.error("count must be at least 1")
+    if any(index < 0 or index >= cli_args.count for index in cli_args.skip_index):
+        parser.error("skip indexes must be within the requested curve count")
+    if (cli_args.index_file is None) != (cli_args.index_run_key is None):
+        parser.error("--index-file and --index-run-key must be provided together")
 
     config = load_config(cli_args.config, kind=cli_args.kind)
     return apply_overrides(
@@ -143,11 +161,11 @@ def combined_world_bounds(meshes):
         points.extend(mesh.matrix_world @ Vector(corner) for corner in mesh.bound_box)
     center = sum(points, Vector()) / len(points)
     radius = max((point - center).length for point in points)
-    size = max(
+    dimensions = tuple(
         max(point[axis] for point in points) - min(point[axis] for point in points)
         for axis in range(3)
     )
-    return center, radius, size
+    return center, radius, dimensions
 
 
 def parent_meshes_to_root(scene, meshes, center, model_scale):
@@ -159,7 +177,7 @@ def parent_meshes_to_root(scene, meshes, center, model_scale):
         world_matrix = mesh.matrix_world.copy()
         mesh.parent = root
         mesh.matrix_world = world_matrix
-    root.scale = (model_scale,) * 3
+    root.scale = model_scale
     root.location = (0.0, 0.0, 0.0)
     bpy.context.view_layer.update()
     return root
@@ -266,7 +284,6 @@ def add_playback_animation(
     earth,
     observer_marker,
     light,
-    observer_position,
     camera_distance,
     scene_units_per_m,
     original_rotation,
@@ -291,6 +308,9 @@ def add_playback_animation(
         time_s = min(start_time_s + frame_offset / frames_per_second, end_time_s)
         position_m, _ = scenario["visible_pass"].orbit.position_velocity_eci(time_s)
         satellite_position = Vector(position_m) * scene_units_per_m
+        observer_position = Vector(
+            observer_position_eci(scenario["observer"], time_s)
+        ) * scene_units_per_m
         satellite_root.location = (0.0, 0.0, 0.0)
         satellite_root.rotation_quaternion = satellite_rotation(
             scenario, original_rotation, time_s
@@ -523,6 +543,9 @@ def build_visible_pass(config, rng, observer):
             altitude_max_m=config.altitude_max_m,
             inclination_min_deg=config.inclination_min_deg,
             inclination_max_deg=config.inclination_max_deg,
+            duration_s=config.duration_s,
+            cadence_s=config.cadence_s,
+            max_trimmed_fraction=MAX_TRIMMED_SAMPLE_FRACTION,
         )
 
     orbit = CircularOrbit(
@@ -580,9 +603,14 @@ def build_scenario(config, curve_index, model_spin_axes):
         duration_s=config.duration_s,
         cadence_s=config.cadence_s,
     )
-    samples = longest_visible_window(samples)
-    if len(samples) < 2:
-        raise RuntimeError("Visible pass has fewer than two consecutive samples")
+    selected_samples = select_visible_window(samples)
+    if selected_samples is None:
+        raise RuntimeError(
+            "Fixed pass would require trimming more than "
+            f"{MAX_TRIMMED_SAMPLE_FRACTION:.0%} of requested samples "
+            "or retain fewer than two visible samples"
+        )
+    samples = selected_samples
     sun_direction = build_sun_direction(
         config, rng, tuple(sample.position_m for sample in samples)
     )
@@ -601,6 +629,7 @@ def build_scenario(config, curve_index, model_spin_axes):
             angle_max_deg=config.precession_angle_max_deg,
             period_min_s=config.precession_period_min_s,
             period_max_s=config.precession_period_max_s,
+            precession_fraction=config.precession_fraction,
         )
     return {
         "observer": observer,
@@ -626,30 +655,38 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
     spin_period_s = scenario["spin_period_s"]
     sun_direction = Vector(scenario["sun_direction"]).normalized()
     scene_units_per_m = 1.0 / args.scene_meters_per_unit
-    observer_position = Vector(observer_position_fixed_frame(observer)) * scene_units_per_m
+    initial_observer_position = Vector(
+        observer_position_eci(observer, samples[0].time_from_closest_approach_s)
+    ) * scene_units_per_m
     satellite_root.location = (0.0, 0.0, 0.0)
     original_location = satellite_root.location.copy()
     satellite_root.rotation_mode = "QUATERNION"
     original_rotation = satellite_root.rotation_quaternion.copy()
     camera_distance = max(
         scenario["model_radius"] * 1.8,
-        args.satellite_size_m * scene_units_per_m * 1.2,
+        max(scenario["model_dimensions_m"]) * scene_units_per_m * 1.2,
     )
     camera.data.clip_start = max(camera_distance * 1e-3, 1e-9)
     light.rotation_euler = (-sun_direction).to_track_quat("-Z", "Y").to_euler()
     earth = bpy.data.objects["SyntheticEarth"]
+    earth.visible_shadow = False
     observer_marker = bpy.data.objects["SyntheticObserver"]
     initial_satellite_position = Vector(samples[0].position_m) * scene_units_per_m
     sun_position = sun_direction * (SUN_DISTANCE_M * scene_units_per_m)
     earth.location = -initial_satellite_position
-    observer_marker.location = observer_position - initial_satellite_position
+    observer_marker.location = initial_observer_position - initial_satellite_position
     light.location = sun_position - initial_satellite_position
 
     raw_fluxes = []
     corrected_fluxes = []
-    eclipsed_flags = [
-        is_eclipsed(sample.position_m, tuple(sun_direction)) for sample in samples
+    shadow_states = [
+        shadow_state(sample.position_m, tuple(sun_direction)) for sample in samples
     ]
+    solar_fractions = [
+        solar_illumination_fraction(sample.position_m, tuple(sun_direction))
+        for sample in samples
+    ]
+    eclipsed_flags = [state != SUNLIT for state in shadow_states]
     actual_eclipse_fraction = sum(eclipsed_flags) / len(eclipsed_flags)
     if actual_eclipse_fraction > args.max_eclipse_fraction:
         raise RuntimeError(
@@ -659,14 +696,19 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
     reference_range_m = samples[0].range_m
     with tempfile.TemporaryDirectory(prefix="blender-synth-lc-") as temp_dir:
         frame_path = Path(temp_dir) / "frame.exr"
-        for sample, eclipsed in zip(samples, eclipsed_flags):
-            if eclipsed:
+        for sample, shadow, solar_fraction in zip(
+            samples, shadow_states, solar_fractions
+        ):
+            if shadow == UMBRA:
                 raw_fluxes.append(0.0)
                 corrected_fluxes.append(0.0)
                 continue
 
             time_s = sample.time_from_closest_approach_s
             sample_position = Vector(sample.position_m) * scene_units_per_m
+            observer_position = Vector(
+                observer_position_eci(observer, time_s)
+            ) * scene_units_per_m
             satellite_root.rotation_quaternion = satellite_rotation(
                 scenario, original_rotation, time_s
             )
@@ -677,17 +719,17 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
             earth.location = -sample_position
             observer_marker.location = observer_position - sample_position
             light.location = sun_position - sample_position
-            raw_flux = render_flux(scene, frame_path)
+            raw_flux = render_flux(scene, frame_path) * solar_fraction
             corrected_flux = raw_flux * (reference_range_m / sample.range_m) ** 2
             raw_fluxes.append(raw_flux)
             corrected_fluxes.append(corrected_flux)
 
     satellite_root.location = original_location
     satellite_root.rotation_quaternion = original_rotation
-    initial_view_direction = (observer_position - initial_satellite_position).normalized()
+    initial_view_direction = (initial_observer_position - initial_satellite_position).normalized()
     camera.location = initial_view_direction * camera_distance
     earth.location = -initial_satellite_position
-    observer_marker.location = observer_position - initial_satellite_position
+    observer_marker.location = initial_observer_position - initial_satellite_position
     light.location = sun_position - initial_satellite_position
     bpy.context.view_layer.update()
     maximum_flux = max(corrected_fluxes)
@@ -712,12 +754,28 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
             "elevation_deg",
             "visible",
             "eclipsed",
+            "shadow_state",
+            "solar_illumination_fraction",
             "render_flux_linear_rgb",
             "flux_with_range_correction",
             "relative_flux",
         ))
-        for sample, time_s, raw_flux, corrected_flux, eclipsed in zip(
-            samples, time_from_start_s, raw_fluxes, corrected_fluxes, eclipsed_flags
+        for (
+            sample,
+            time_s,
+            raw_flux,
+            corrected_flux,
+            eclipsed,
+            shadow,
+            solar_fraction,
+        ) in zip(
+            samples,
+            time_from_start_s,
+            raw_fluxes,
+            corrected_fluxes,
+            eclipsed_flags,
+            shadow_states,
+            solar_fractions,
         ):
             writer.writerow((
                 time_s,
@@ -726,6 +784,8 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
                 sample.elevation_deg,
                 int(sample.visible),
                 int(eclipsed),
+                shadow,
+                solar_fraction,
                 raw_flux,
                 corrected_flux,
                 corrected_flux / maximum_flux,
@@ -743,10 +803,11 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
         "mesh_objects": [mesh.name for mesh in meshes],
         "curve_index": curve_index,
         "seed": args.seed,
+        "dataset_run_key": args.index_run_key,
         "observer": {
             "latitude_deg": observer.latitude_deg,
             "longitude_deg": observer.longitude_deg,
-            "earth_rotation_ignored": True,
+            "earth_rotation_ignored": False,
         },
         "orbit": {
             "altitude_m": visible_pass.orbit.altitude_m,
@@ -787,22 +848,41 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
             "exposure_ev": args.exposure,
             "sun_irradiance_w_m2": args.sun_energy,
             "eclipse_fraction": actual_eclipse_fraction,
+            "umbra_sample_count": shadow_states.count(UMBRA),
+            "penumbra_sample_count": shadow_states.count(PENUMBRA),
             "max_eclipse_fraction": args.max_eclipse_fraction,
             "camera_ortho_scale_m": camera.data.ortho_scale * args.scene_meters_per_unit,
             "scene_meters_per_unit": args.scene_meters_per_unit,
-            "satellite_max_extent_m": args.satellite_size_m,
+            "model_dimensions_m": {
+                axis: dimension
+                for axis, dimension in zip("xyz", scenario["model_dimensions_m"])
+            },
+            "model_axis_scale_factors": {
+                axis: factor
+                for axis, factor in zip("xyz", scenario["model_axis_scale_factors"])
+            },
+            "model_dimensions_source": (
+                "models/model_sizes.json"
+                if scenario["model_dimensions_calibrated"]
+                else "native Blender bounds (assumed to be correct)"
+            ),
             "sun_distance_m": SUN_DISTANCE_M,
             "sun_direction_to_sun": list(sun_direction),
         },
         "photometry": {
             "flux_definition": "sum of linear RGB render pixels, multiplied by reference_range^2/range^2",
             "normalized_to_maximum": True,
-            "eclipse_model": "cylindrical Earth shadow",
-            "limitations": [
-                "model bounds are not calibrated to physical spacecraft dimensions",
-                "no atmosphere or calibrated surface photometry",
-                "relative flux is a rendering proxy, not an absolute magnitude",
-            ],
+            "eclipse_model": "conical Earth shadow with finite solar disk",
+            "limitations": (
+                ([] if scenario["model_dimensions_calibrated"] else [
+                    "native model bounds are assumed to represent physical dimensions"
+                ])
+                + [
+                    "no atmosphere or calibrated surface photometry",
+                    "penumbra illumination is applied as a uniform solar-disk fraction",
+                    "relative flux is a rendering proxy, not an absolute magnitude",
+                ]
+            ),
         },
         "diagnostic_plot": str(plot_path),
         "eclipsed_sample_count": int(sum(eclipsed_flags)),
@@ -819,7 +899,6 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
             earth,
             observer_marker,
             light,
-            observer_position,
             camera_distance,
             scene_units_per_m,
             original_rotation,
@@ -833,6 +912,7 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
 def main():
     args = parse_args()
     model_spin_axes = load_model_spin_axes(REPO_ROOT / "models" / "spin_axes.json")
+    model_sizes = load_model_sizes(REPO_ROOT / "models" / "model_sizes.json")
     if not args.model.is_file():
         raise FileNotFoundError(args.model)
     if Path(bpy.data.filepath).resolve() != args.model.resolve():
@@ -846,11 +926,24 @@ def main():
     configure_black_world(scene)
     scene.unit_settings.system = "METRIC"
     scene.unit_settings.scale_length = args.scene_meters_per_unit
-    model_center, model_radius, model_size = combined_world_bounds(meshes)
-    if model_size <= 0.0:
+    model_center, model_radius, source_dimensions = combined_world_bounds(meshes)
+    if max(source_dimensions) <= 0.0:
         raise RuntimeError("Cannot scale a model with zero-size mesh bounds")
     scene_units_per_m = 1.0 / args.scene_meters_per_unit
-    model_scale = args.satellite_size_m * scene_units_per_m / model_size
+    model_scale, model_dimensions_m, model_dimensions_calibrated = (
+        resolve_model_dimensions(
+            args.model.name,
+            source_dimensions,
+            model_sizes,
+            args.scene_meters_per_unit,
+        )
+    )
+    model_radius = sqrt(
+        sum(
+            (dimension * scale * 0.5) ** 2
+            for dimension, scale in zip(source_dimensions, model_scale)
+        )
+    )
     satellite_root = parent_meshes_to_root(scene, meshes, model_center, model_scale)
     device = configure_device(scene, args.device)
     scene.cycles.samples = args.samples
@@ -871,19 +964,31 @@ def main():
     camera, light = add_camera_and_sun(
         scene, satellite_root.location, satellite_root, Vector((0.0, -1.0, 0.0)),
         max(
-            model_radius * model_scale * 1.8,
-            args.satellite_size_m * scene_units_per_m * 1.2,
+            model_radius * 1.8,
+            max(model_dimensions_m) * scene_units_per_m * 1.2,
         ),
         dummy_sun,
         args.sun_energy,
     )
 
     for curve_index in range(args.count):
+        if curve_index in args.skip_index:
+            continue
         scenario = build_scenario(args, curve_index, model_spin_axes)
-        scenario["model_radius"] = model_radius * model_scale
+        scenario["model_radius"] = model_radius
+        scenario["model_dimensions_m"] = model_dimensions_m
+        scenario["model_axis_scale_factors"] = model_scale
+        scenario["model_dimensions_calibrated"] = model_dimensions_calibrated
         write_curve_files(
             args, curve_index, scenario, satellite_root, meshes, device, scene, camera, light
         )
+        if args.index_file is not None:
+            record_completed_curve(
+                args.index_file,
+                args.index_run_key,
+                args.model,
+                curve_index,
+            )
 
     if args.script_output is None:
         bpy.data.objects.remove(camera, do_unlink=True)

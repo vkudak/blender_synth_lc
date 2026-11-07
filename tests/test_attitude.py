@@ -93,6 +93,19 @@ def test_static_satellite_has_no_sampled_precession():
     )
 
 
+def test_precession_fraction_selects_rotating_curves_reproducibly():
+    def sample(seed, fraction):
+        return sample_precession_parameters(
+            Random(seed), True, 5.0, 30.0, 20.0, 180.0, fraction
+        )
+
+    assert sample(1, 0.0) == (0.0, 0.0, 0.0)
+    assert sample(2, 1.0)[0] > 0.0
+    assert sample(1, 0.5)[0] > 0.0
+    assert sample(1, 0.5) == sample(1, 0.5)
+    assert sample(2, 0.5) == (0.0, 0.0, 0.0)
+
+
 @pytest.mark.parametrize("period_s", [-1.0, math.inf, math.nan])
 def test_invalid_period_is_rejected(period_s):
     with pytest.raises(ValueError):
