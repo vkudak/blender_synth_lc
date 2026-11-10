@@ -51,7 +51,9 @@ def test_dataset_runner_passes_even_total_allocation_to_models(tmp_path, monkeyp
         "blender_command",
         lambda config, model, **kwargs: allocated_counts.append(kwargs["count"]) or [],
     )
-    monkeypatch.setattr(generate_dataset, "run_blender", lambda command: 0)
+    monkeypatch.setattr(
+        generate_dataset, "run_blender", lambda command, on_progress=None: 0
+    )
     monkeypatch.setattr(
         sys,
         "argv",
@@ -90,7 +92,7 @@ def test_dataset_runner_resumes_and_force_indexes_restarts(tmp_path, monkeypatch
         commands.append(command)
         return command
 
-    def fake_run_blender(command):
+    def fake_run_blender(command, on_progress=None):
         for curve_index in range(command["count"]):
             if curve_index not in command["skip_indices"]:
                 record_completed_curve(
@@ -99,6 +101,8 @@ def test_dataset_runner_resumes_and_force_indexes_restarts(tmp_path, monkeypatch
                     command["model"],
                     curve_index,
                 )
+                if on_progress is not None:
+                    on_progress()
         return 0
 
     monkeypatch.setattr(generate_dataset, "blender_command", fake_blender_command)
@@ -119,3 +123,30 @@ def test_dataset_runner_resumes_and_force_indexes_restarts(tmp_path, monkeypatch
     assert generate_dataset.main() == 0
     assert len(commands) == 2
     assert commands[1]["skip_indices"] == ()
+
+
+def test_curve_progress_recovers_after_truncated_index_tail(tmp_path):
+    model = tmp_path / "model.blend"
+    model.touch()
+    index_file = tmp_path / "dataset" / ".dataset_indexes.jsonl"
+    config = load_config(PROJECT_ROOT / "config" / "dataset.ini", kind="dataset")
+    run_key = generate_dataset.dataset_run_key(config, model, config.seed)
+    record_completed_curve(index_file, run_key, model, 0)
+    with index_file.open("a", encoding="utf-8") as journal:
+        journal.write('{"version":1,"run_key":')
+
+    class Progress:
+        updates = 0
+
+        def update(self):
+            self.updates += 1
+
+    progress = Progress()
+    update_progress = generate_dataset._curve_progress_callback(
+        index_file, run_key, model, 2, (0,), progress
+    )
+    record_completed_curve(index_file, run_key, model, 1)
+
+    update_progress()
+
+    assert progress.updates == 1

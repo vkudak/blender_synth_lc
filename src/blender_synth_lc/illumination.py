@@ -1,4 +1,4 @@
-from math import asin, atan2, cos, sin, sqrt, tau
+from math import asin, atan2, cos, degrees, sin, sqrt, tau
 from random import Random
 
 from .orbit import EARTH_EQUATORIAL_RADIUS_M, Vector3
@@ -21,6 +21,42 @@ def sample_unit_vector(rng: Random) -> Vector3:
 def sample_sun_direction(rng: Random) -> Vector3:
     """Return a unit vector pointing from Earth toward the Sun."""
     return sample_unit_vector(rng)
+
+
+def phase_angle_deg(
+    satellite_position_m: Vector3,
+    observer_position_m: Vector3,
+    sun_direction: Vector3,
+    sun_distance_m: float = SUN_DISTANCE_M,
+) -> float:
+    """Return the Sun-satellite-observer angle, with its vertex at the satellite."""
+    sun_length = sqrt(sum(component**2 for component in sun_direction))
+    if sun_length == 0.0:
+        raise ValueError("sun_direction must be a non-zero vector")
+    if sun_distance_m <= 0.0:
+        raise ValueError("sun_distance_m must be positive")
+
+    unit_sun = tuple(component / sun_length for component in sun_direction)
+    satellite_to_sun = tuple(
+        sun_distance_m * unit_sun[axis] - satellite_position_m[axis]
+        for axis in range(3)
+    )
+    satellite_to_observer = tuple(
+        observer_position_m[axis] - satellite_position_m[axis]
+        for axis in range(3)
+    )
+    sun_vector_length = sqrt(sum(component**2 for component in satellite_to_sun))
+    observer_vector_length = sqrt(
+        sum(component**2 for component in satellite_to_observer)
+    )
+    if observer_vector_length == 0.0:
+        raise ValueError("observer_position_m must differ from satellite_position_m")
+
+    cosine = sum(
+        satellite_to_sun[axis] * satellite_to_observer[axis]
+        for axis in range(3)
+    ) / (sun_vector_length * observer_vector_length)
+    return degrees(acos_clamped(cosine))
 
 
 def perpendicular_distance_to_axis(position_m: Vector3, axis_direction: Vector3) -> float:

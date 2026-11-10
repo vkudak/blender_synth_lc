@@ -7,9 +7,13 @@ Roadmap items for the Blender Synthetic Light Curves project. Items are ordered 
 - [x] **Physical precession / attitude nutation** — Add Simple spin mode with angle of spin axis, phase and period.
 - [x] **Enforce 20° minimum satellite elevation** — The configurable INI mask defaults to 20°. Retain the longest consecutive segment above the mask only when it removes at most 15% of the requested samples; random mode retries rejected candidates and fixed configurations fail clearly. The threshold is validated as finite and within `[0, 90)` before Blender starts.
 - [x] **Visible-only sampling cleanup** — Below-mask samples are excluded from CSV rows; retained samples carry visibility/eclipsed flags, and eclipsed rows are documented as zero-flux placeholders.
-- [x] **Model scale calibration** — Add optional per-model X/Y/Z target dimensions in meters to `models/model_sizes.json`; absent models retain their native bounds and are assumed correct. Populate calibrated dimensions and validate them against Blender inventory bounds.
+- [x] **Model scale calibration** — Add optional per-model X/Y/Z target dimensions in meters to `models/model_shapes.json`; models without dimensions retain their native bounds and are assumed correct. Populate calibrated dimensions and validate them against Blender inventory bounds.
 - [x] **Empty-geometry model handling** — Inspect selected models before dataset runs; warn and stop if a mesh object has zero vertices so the user can repair or remove the affected model.
 - [x] **Earth rotation during pass** — Rotate the observer and local horizon at the sidereal rate, including look angles, pass alignment, rendering, and playback.
+- [x] **Progres bar** for dataset script
+- [x] **Change RSO scale** from 1 to 1.5
+- [x] **Additional features** like phase angle, distance to object, elevation above horizont
+- [x] **Add Noise** with respect to the elevation of RSO
 
 ## Mid Term
 

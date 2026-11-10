@@ -4,7 +4,8 @@ import pytest
 
 from blender_synth_lc.config import (
     load_config,
-    load_model_sizes,
+    ModelShape,
+    load_model_shapes,
     resolve_model_dimensions,
 )
 
@@ -24,6 +25,46 @@ def test_dataset_config_loads_precession_settings():
     assert config.precession_angle_max_deg == 30.0
     assert config.precession_period_min_s == 20.0
     assert config.precession_period_max_s == 180.0
+    assert config.model_scale_min == 1.0
+    assert config.model_scale_max == 1.5
+    assert config.reference_snr == 50.0
+
+
+def test_curve_config_loads_reference_snr():
+    config = load_config(PROJECT_ROOT / "config" / "curve.ini", kind="curve")
+
+    assert config.reference_snr == 50.0
+
+
+@pytest.mark.parametrize("value", ("0", "-1", "nan", "inf"))
+def test_invalid_reference_snr_is_rejected(tmp_path, value):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(
+        source.replace("reference_snr = 50", f"reference_snr = {value}"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="noise.reference_snr must be finite and positive"):
+        load_config(config_path, kind="dataset")
+
+
+@pytest.mark.parametrize("setting,value", (
+    ("model_scale_min", "0"),
+    ("model_scale_max", "nan"),
+    ("model_scale_max", "0.5"),
+))
+def test_invalid_dataset_model_scale_ranges_are_rejected(tmp_path, setting, value):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    original = "1" if setting == "model_scale_min" else "1.5"
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(
+        source.replace(f"{setting} = {original}", f"{setting} = {value}"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="model scale range"):
+        load_config(config_path, kind="dataset")
 
 
 @pytest.mark.parametrize("value", ("0", "-1"))
@@ -114,23 +155,30 @@ def test_elevation_masks_below_ten_warn_and_clamp(tmp_path, value):
     assert config.minimum_elevation_deg == 10.0
 
 
-def test_model_sizes_load_per_axis_dimensions(tmp_path):
-    config_path = tmp_path / "model_sizes.json"
+def test_model_shapes_load_required_fields_and_optional_dimensions(tmp_path):
+    config_path = tmp_path / "model_shapes.json"
     config_path.write_text(
-        '{"Lotos_model.blend": {"dimensions_m": '
-        '{"x": 4.0, "y": 2.0, "z": 1.0}}}',
+        '{"Lotos_model.blend": {"body_shape": ["cube"], "solar_panel_count": 2, '
+        '"dimensions_m": {"x": 4.0, "y": 2.0, "z": 1.0}},'
+        ' "Other.blend": {"body_shape": ["cylinder"], "solar_panel_count": 0}}',
         encoding="utf-8",
     )
 
-    assert load_model_sizes(config_path) == {"Lotos_model.blend": (4.0, 2.0, 1.0)}
+    shapes = load_model_shapes(config_path)
+
+    assert shapes["Lotos_model.blend"] == ModelShape(("cube",), 2, (4.0, 2.0, 1.0))
+    assert shapes["Other.blend"] == ModelShape(("cylinder",), 0, None)
 
 
-def test_empty_model_sizes_map_uses_native_dimensions(tmp_path):
-    config_path = tmp_path / "model_sizes.json"
-    config_path.write_text("{}\n", encoding="utf-8")
+def test_model_without_dimensions_uses_native_dimensions(tmp_path):
+    config_path = tmp_path / "model_shapes.json"
+    config_path.write_text(
+        '{"Lotos_model.blend": {"body_shape": ["cube"], "solar_panel_count": 0}}',
+        encoding="utf-8",
+    )
 
     model_scale, dimensions_m, calibrated = resolve_model_dimensions(
-        "Lotos_model.blend", (2.0, 4.0, 1.0), load_model_sizes(config_path), 0.5
+        "Lotos_model.blend", (2.0, 4.0, 1.0), load_model_shapes(config_path), 0.5
     )
 
     assert model_scale == (1.0, 1.0, 1.0)
@@ -138,27 +186,51 @@ def test_empty_model_sizes_map_uses_native_dimensions(tmp_path):
     assert not calibrated
 
 
+def test_model_missing_from_shapes_is_rejected():
+    with pytest.raises(ValueError, match="model_shapes.json"):
+        resolve_model_dimensions("Lotos_model.blend", (1.0, 1.0, 1.0), {}, 1.0)
+
+
 @pytest.mark.parametrize(
-    "content",
+    ("content", "message"),
     (
-        '{"Lotos_model.blend": {"dimensions_m": {"x": 1, "y": 2}}}',
-        '{"Lotos_model.blend": {"dimensions_m": {"x": 1, "y": 2, "z": 0}}}',
-        '{"Lotos_model.blend": {"dimensions_m": {"x": 1, "y": 2, "z": NaN}}}',
+        ('{"M.blend": {"solar_panel_count": 1}}', "body_shape"),
+        ('{"M.blend": {"body_shape": [], "solar_panel_count": 1}}', "body_shape"),
+        ('{"M.blend": {"body_shape": ["cube"]}}', "solar_panel_count"),
+        ('{"M.blend": {"body_shape": ["cube"], "solar_panel_count": -1}}', "solar_panel_count"),
+        ('{"M.blend": {"body_shape": ["cube"], "solar_panel_count": 1.5}}', "solar_panel_count"),
+        (
+            '{"M.blend": {"body_shape": ["cube"], "solar_panel_count": 1, '
+            '"dimensions_m": {"x": 1, "y": 2}}}',
+            "dimensions_m",
+        ),
+        (
+            '{"M.blend": {"body_shape": ["cube"], "solar_panel_count": 1, '
+            '"dimensions_m": {"x": 1, "y": 2, "z": 0}}}',
+            "dimensions_m",
+        ),
     ),
 )
-def test_invalid_model_sizes_are_rejected(tmp_path, content):
-    config_path = tmp_path / "model_sizes.json"
+def test_invalid_model_shapes_are_rejected(tmp_path, content, message):
+    config_path = tmp_path / "model_shapes.json"
     config_path.write_text(content, encoding="utf-8")
 
-    with pytest.raises(ValueError, match="dimensions_m"):
-        load_model_sizes(config_path)
+    with pytest.raises(ValueError, match=message):
+        load_model_shapes(config_path)
+
+
+def test_repository_model_shapes_cover_all_models():
+    shapes = load_model_shapes(PROJECT_ROOT / "models" / "model_shapes.json")
+
+    for model in (PROJECT_ROOT / "models").glob("*.blend"):
+        assert model.name in shapes
 
 
 def test_model_size_map_scales_each_axis_to_target_meters():
     model_scale, dimensions_m, calibrated = resolve_model_dimensions(
         "Lotos_model.blend",
         (2.0, 4.0, 8.0),
-        {"Lotos_model.blend": (4.0, 2.0, 1.0)},
+        {"Lotos_model.blend": ModelShape(("cube",), 1, (4.0, 2.0, 1.0))},
         0.5,
     )
 

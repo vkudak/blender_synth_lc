@@ -1,0 +1,28 @@
+{
+    "example.blend": {
+        "body_shape": ["cube"],
+        "solar_panel_count": 0,
+        "dimensions_m": {"x": 4.0, "y": 2.0, "z": 1.5}
+    },
+    "Topex_good.blend": {
+        "body_shape": ["cube"],
+        "solar_panel_count": 1,
+        "dimensions_m": {"x": 3.73, "y": 2.77, "z": 2.3}
+    },
+    "Topex_g.blend": {"body_shape": ["cube"], "solar_panel_count": 1},
+    "Topex_g3.blend": {"body_shape": ["cube"], "solar_panel_count": 1},
+    "Topex_g5_spb.blend": {"body_shape": ["cube"], "solar_panel_count": 1},
+    "Topex_g5_spb3.blend": {"body_shape": ["cube"], "solar_panel_count": 1},
+
+    "Lotos_model.blend": {"body_shape": ["cylinder"], "solar_panel_count": 2},
+    "glob_gen_1.blend": {"body_shape": ["prismatoid"], "solar_panel_count": 2},
+
+    "Chandra.blend": {"body_shape": ["cylinder"], "solar_panel_count": 2},
+    "LandSat.blend": {"body_shape": ["cube"], "solar_panel_count": 1},
+    
+    "SL-14.blend": {"body_shape": ["cylinder"], "solar_panel_count": 0},
+    "SSL-1300.blend": {"body_shape": ["cube"], "solar_panel_count": 2},
+    
+    "TESS.blend": {"body_shape": ["cube"], "solar_panel_count": 2},
+    "Vehicle.blend": {"body_shape": ["cylinder"], "solar_panel_count": 0}
+}

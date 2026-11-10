@@ -252,6 +252,17 @@ def _write_render_script(path: Path, render_args: list[str]) -> None:
     path.write_text(source, encoding="utf-8")
 
 
-def run_blender(command: list[str]) -> int:
+def run_blender(command: list[str], on_progress=None) -> int:
     print(" ".join(command), flush=True)
-    return subprocess.run(command, check=False).returncode
+    if on_progress is None:
+        return subprocess.run(command, check=False).returncode
+
+    with subprocess.Popen(command) as process:
+        while True:
+            on_progress()
+            try:
+                returncode = process.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                continue
+            on_progress()
+            return returncode

@@ -102,11 +102,13 @@ If `[paths] models` is empty, every `.blend` in `models_dir` is selected except 
 
 Dataset runs are resumable. The output directory contains a hidden `.dataset_indexes.jsonl` journal that records each curve index only after its CSV, JSON, and SVG have been written. Re-running with the same settings, models, and seed skips recorded curves and continues missing indexes. Increasing `total_curves` continues at the new indexes. A changed configuration, model file, or seed gets a separate index entry. Use `--force_indexes` (or `--force-indexes`) to delete the saved indexes and regenerate all requested curves. This removes only the index file; existing outputs are kept, and regenerated curves get new filenames.
 
+Dataset generation displays completed-curve progress on stderr. Blender's stdout and stderr remain connected to the console, so its diagnostics and traceback are visible if a run fails.
+
 `total_curves` is the total number of curves across all selected models. The runner divides this total as evenly as possible; model counts differ by at most one, with any remainder assigned to the first models in selection order. Automatically discovered models are sorted by filename. The total must be at least the number of selected models so every model receives at least one curve. A model's base seed is offset by 10,000 for each model in the selection; the curve index is added within that model.
 
 ## Configuration Reference
 
-Both INI files use `[blender]`, `[paths]`, `[run]`, `[observer]`, `[orbit]`, `[pass]`, `[attitude]`, `[sun]`, and `[render]`. Dataset configuration additionally uses `[dataset]`. Values below are the supported options and their meanings; numeric defaults are the defaults in the loader unless a value is explicitly described as being from the example INI.
+Both INI files use `[blender]`, `[paths]`, `[run]`, `[observer]`, `[orbit]`, `[pass]`, `[attitude]`, `[sun]`, `[noise]`, and `[render]`. Dataset configuration additionally uses `[dataset]`. Values below are the supported options and their meanings; numeric defaults are the defaults in the loader unless a value is explicitly described as being from the example INI.
 
 ### `[blender]`
 
@@ -186,7 +188,13 @@ Earth occultation uses a conical shadow with the finite angular disk of the Sun.
 - `scene_meters_per_unit`: physical meters represented by one Blender unit; default `1`, must be positive.
 - `script_output`: optional path for a saved renderer script; empty means use the normal renderer entry point.
 
-The render uses Cycles, denoising, AgX, a black background, a close-up orthographic camera, and a Sun light. Existing cameras and lights in the model are hidden from rendering. Per-model physical dimensions can be configured in `models/model_sizes.json`; unlisted models are used at their native Blender bounds, assumed to already be correct.
+### `[noise]`
+
+- `reference_snr`: signal-to-noise ratio for normalized flux `1` at `90 deg` elevation; default `50`. This defines the reference 1-sigma uncertainty as `1 / reference_snr`.
+
+The initial measurement-noise model is a Gaussian approximation to photon shot noise. For normalized clean flux `f` and elevation `e`, it calculates relative airmass with the Kasten-Young formula, normalized to exactly `1` at zenith: `X(e) = [sin(e) + 0.50572 * (e + 6.07995)^(-1.6364)]^(-1) / X(90 deg)`. The absolute uncertainty in normalized-flux units is `sigma = sqrt(f * X(e)) / reference_snr`, and the noisy value is sampled from `Normal(f, sigma)`. Thus fainter points and lower elevations have larger relative uncertainty; noise has zero mean and the clean `relative_flux` remains unchanged. This first model omits sky background, read noise, extinction of the mean signal, and absolute brightness differences between objects. The noise seed is separate and deterministic for each curve.
+
+The render uses Cycles, denoising, AgX, a black background, a close-up orthographic camera, and a Sun light. Existing cameras and lights in the model are hidden from rendering. Every model must be listed in `models/model_shapes.json` with its shape metadata; optional per-model physical dimensions can be configured there, and models without `dimensions_m` are used at their native Blender bounds, assumed to already be correct.
 
 ### `[dataset]`
 
@@ -195,6 +203,7 @@ The render uses Cycles, denoising, AgX, a black background, a close-up orthograp
 - `precession_fraction`: probability that a rotating curve has precession, in `[0, 1]`; default `0.5`. Selection is seeded and independent per curve, so the realized fraction can differ, especially in small datasets. Static curves never precess. A zero sampled precession angle also disables precession.
 - `precession_angle_min_deg`, `precession_angle_max_deg`: ordered range in `[0, 180] deg`; example defaults `5` and `30`.
 - `precession_period_min_s`, `precession_period_max_s`: ordered positive period range in seconds; example defaults `20` and `180`.
+- `model_scale_min`, `model_scale_max`: ordered, finite, positive dimensionless multipliers; example range `1` to `1.5`. Dataset curves independently sample an isotropic multiplier from this range, scaling the model dimensions relative to its calibrated or native size. Curve generation always uses a multiplier of `1`.
 
 ### Spin-axis rules
 
@@ -208,17 +217,25 @@ The render uses Cycles, denoising, AgX, a black background, a close-up orthograp
 
 Unlisted models use all three axes. These are Blender scene axes; selection is made for each curve using its seeded random generator.
 
-`models/model_sizes.json` optionally defines calibrated final dimensions in meters for each model, measured along its original Blender scene X/Y/Z axes. Each dimension must be positive. The renderer scales the model independently along each axis to reach these dimensions. For example:
+`models/model_shapes.json` is required and must contain an entry for every model rendered; rendering fails for unlisted models. Each entry has:
+
+- `body_shape` (required): non-empty list of strings describing the bus geometry, for example `["cube"]` or `["cylinder"]`.
+- `solar_panel_count` (required): non-negative integer number of solar panels.
+- `dimensions_m` (optional): calibrated final dimensions in meters along the original Blender scene X/Y/Z axes, each positive. The renderer scales the model independently along each axis to reach these dimensions.
 
 ```json
 {
   "Topex_good.blend": {
+    "body_shape": ["cube"],
+    "solar_panel_count": 1,
     "dimensions_m": {"x": 4.0, "y": 2.0, "z": 1.5}
   }
 }
 ```
 
-If a model is not listed, its native bounds are left unchanged and treated as already correct. `scene_meters_per_unit` converts those native Blender units to meters. The JSON sidecar records the resulting dimensions, axis scale factors, and whether values came from this calibration file or native bounds.
+`body_shape` and `solar_panel_count` are written to each curve's JSON sidecar.
+
+If a listed model has no `dimensions_m`, its native bounds are left unchanged and treated as already correct. `scene_meters_per_unit` converts those native Blender units to meters. The JSON sidecar records the resulting dimensions, axis scale factors, and whether values came from this calibration file or native bounds.
 
 ## Coordinate System and Scenario Model
 
@@ -226,7 +243,7 @@ The orbit and ground-site calculations use Cartesian coordinates in meters with 
 
 The observer's latitude and longitude are geodetic WGS-84 coordinates converted to Earth-fixed Cartesian coordinates. At the orbit epoch (`t=0`), the Earth-fixed and inertial axes coincide; at other times, the observer and local horizon rotate eastward around `+Z` with a constant sidereal period of 86,164.0905 seconds. Azimuth is clockwise from north and elevation is above the rotating horizon. Pass alignment accounts for the observer's rotational velocity so the range is locally minimal at the epoch. This relative epoch convention does not use UTC, Greenwich sidereal time, polar motion, or a full Earth-orientation transformation; RAAN and Sun direction are specified in the same epoch frame, not tied to an actual observation date.
 
-Blender uses a satellite-centered rendering scene for numerical precision. The satellite root stays at the origin; at each sample, Earth, the observer marker, and the Sun are positioned relative to the satellite. The camera is placed in the observer-to-satellite direction and tracks the satellite center, but does not rotate with the spacecraft body. `scene_meters_per_unit` converts physical distances to Blender units. If a model has a `dimensions_m` entry in `models/model_sizes.json`, its combined mesh bounds are scaled independently along X/Y/Z; otherwise its native bounds are retained.
+Blender uses a satellite-centered rendering scene for numerical precision. The satellite root stays at the origin; at each sample, Earth, the observer marker, and the Sun are positioned relative to the satellite. The camera is placed in the observer-to-satellite direction and tracks the satellite center, but does not rotate with the spacecraft body. `scene_meters_per_unit` converts physical distances to Blender units. If a model has a `dimensions_m` entry in `models/model_shapes.json`, its combined mesh bounds are scaled independently along X/Y/Z; otherwise its native bounds are retained.
 
 ## How a Light Curve Is Generated
 
@@ -246,6 +263,7 @@ The CSV columns are:
 
 - `time_from_start_s`: seconds from the first retained sample.
 - `range_m`, `azimuth_deg`, `elevation_deg`: observer geometry at that sample.
+- `phase_angle_deg`: Sun-satellite-observer angle in degrees, evaluated at the satellite for each sample. Let `r_sat` be the satellite's Earth-centered position, `r_obs` the observer's Earth-centered position, `u_sun` the unit Earth-to-Sun direction, and `D_sun` the configured Sun distance. The vectors are `v_obs = r_obs - r_sat` and `v_sun = D_sun * u_sun - r_sat`; the column is `acos(clamp(dot(v_sun, v_obs) / (|v_sun| * |v_obs|), -1, 1))` converted to degrees. Thus `0 deg` means full phase (Sun and observer in the same direction from the satellite), `90 deg` quadrature, and `180 deg` new phase. The Sun position uses the same finite-distance approximation as the illumination model.
 - `visible`: visibility-mask flag (`0` or `1`); retained rows are expected to be visible.
 - `eclipsed`: flag (`0` or `1`) set for both penumbra and umbra samples.
 - `shadow_state`: `sunlit`, `penumbra`, or `umbra` for the sample.
@@ -253,10 +271,12 @@ The CSV columns are:
 - `render_flux_linear_rgb`: sum of linear RGB render pixels before range correction.
 - `flux_with_range_correction`: raw render flux multiplied by `(reference_range / current_range)^2`.
 - `relative_flux`: corrected flux normalized to the largest value in the curve.
+- `relative_flux_noisy`: clean normalized flux plus a seeded Gaussian noise sample; values are not clipped, so a noisy measurement may be negative.
+- `noise_sigma`: per-sample absolute 1-sigma uncertainty in normalized-flux units.
 
-The JSON sidecar records the model, seed, observer, orbit, retained pass, attitude/precession, Blender version/device/render settings, eclipse fraction, and limitations. The SVG displays normalized relative flux against time.
+The JSON sidecar records the model, seed, observer, orbit, retained pass, attitude/precession, Blender version/device/render settings, sampled model scale factor, final dimensions, eclipse fraction, and limitations. The SVG displays normalized relative flux against time.
 
-These values are a rendering-based relative-flux proxy, not calibrated magnitude or absolute photometry. Models absent from `models/model_sizes.json` are assumed to have correct native physical dimensions; material reflectance remains uncalibrated. Other limitations include no atmosphere, uniform scaling of the rendered flux by the visible solar-disk fraction in penumbra, circular two-body orbits, and a simplified Earth-orientation model. Per-model physical dimensions still need to be supplied and validated for calibrated assets.
+These values are a rendering-based relative-flux proxy, not calibrated magnitude or absolute photometry. Models without `dimensions_m` in `models/model_shapes.json` are assumed to have correct native physical dimensions; material reflectance remains uncalibrated. Other limitations include no atmosphere, uniform scaling of the rendered flux by the visible solar-disk fraction in penumbra, circular two-body orbits, and a simplified Earth-orientation model. Per-model physical dimensions still need to be supplied and validated for calibrated assets.
 
 ## Audit Blender Models
 

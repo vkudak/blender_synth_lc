@@ -71,6 +71,9 @@ class SynthConfig:
     precession_angle_max_deg: float
     precession_period_min_s: float
     precession_period_max_s: float
+    model_scale_min: float
+    model_scale_max: float
+    reference_snr: float
     sun_mode: str
     sun_direction: tuple[float, float, float]
     sun_energy: float
@@ -127,9 +130,12 @@ def load_config(path: Path, kind: str) -> SynthConfig:
         _resolve_path(script_output_value, config_path) if script_output_value else None
     )
     scene_meters_per_unit = getfloat("render", "scene_meters_per_unit", 1.0)
+    reference_snr = getfloat("noise", "reference_snr", 50.0)
     max_eclipse_fraction = getfloat("sun", "max_eclipse_fraction", 0.15)
     if scene_meters_per_unit <= 0.0:
         raise ValueError("render.scene_meters_per_unit must be positive")
+    if not isfinite(reference_snr) or reference_snr <= 0.0:
+        raise ValueError("noise.reference_snr must be finite and positive")
     if not 0.0 <= max_eclipse_fraction < 1.0:
         raise ValueError("sun.max_eclipse_fraction must be in [0, 1)")
     selected_models = _split_list(get("paths", "models", fallback=""))
@@ -165,6 +171,16 @@ def load_config(path: Path, kind: str) -> SynthConfig:
         if kind == "dataset"
         else precession_period_s
     )
+    model_scale_min = (
+        parser.getfloat("dataset", "model_scale_min", fallback=1.0)
+        if kind == "dataset"
+        else 1.0
+    )
+    model_scale_max = (
+        parser.getfloat("dataset", "model_scale_max", fallback=1.0)
+        if kind == "dataset"
+        else 1.0
+    )
     if not all(isfinite(value) for value in (
         precession_angle_deg,
         precession_period_s,
@@ -187,6 +203,13 @@ def load_config(path: Path, kind: str) -> SynthConfig:
         raise ValueError("dataset precession angle range must be within [0, 180]")
     if precession_period_min_s <= 0.0 or precession_period_max_s < precession_period_min_s:
         raise ValueError("dataset precession period range must be positive and ordered")
+    if (
+        not isfinite(model_scale_min)
+        or not isfinite(model_scale_max)
+        or model_scale_min <= 0.0
+        or model_scale_max < model_scale_min
+    ):
+        raise ValueError("dataset model scale range must be finite, positive, and ordered")
 
     altitude_min_m = getfloat("orbit", "altitude_min_km", MIN_ORBIT_ALTITUDE_M / 1000.0) * 1000.0
     altitude_max_m = getfloat("orbit", "altitude_max_km", MAX_ORBIT_ALTITUDE_M / 1000.0) * 1000.0
@@ -295,6 +318,9 @@ def load_config(path: Path, kind: str) -> SynthConfig:
         precession_angle_max_deg=precession_angle_max_deg,
         precession_period_min_s=precession_period_min_s,
         precession_period_max_s=precession_period_max_s,
+        model_scale_min=model_scale_min,
+        model_scale_max=model_scale_max,
+        reference_snr=reference_snr,
         sun_mode=sun_mode,
         sun_direction=(
             getfloat("sun", "x", 0.71),
@@ -314,33 +340,82 @@ def load_config(path: Path, kind: str) -> SynthConfig:
     return config
 
 
-def load_model_sizes(path: Path) -> dict[str, tuple[float, float, float]]:
+@dataclass(frozen=True)
+class ModelShape:
+    body_shape: tuple[str, ...]
+    solar_panel_count: int
+    dimensions_m: tuple[float, float, float] | None = None
+
+
+def _parse_dimensions_m(model_name: str, dimensions) -> tuple[float, float, float]:
+    if not isinstance(dimensions, dict) or set(dimensions) != {"x", "y", "z"}:
+        raise ValueError(
+            f"dimensions_m for {model_name!r} must define exactly x, y, and z"
+        )
+    values = tuple(dimensions[axis] for axis in ("x", "y", "z"))
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not isfinite(value)
+        or value <= 0.0
+        for value in values
+    ):
+        raise ValueError(
+            f"dimensions_m for {model_name!r} must contain positive finite meters"
+        )
+    return tuple(float(value) for value in values)
+
+
+def load_model_shapes(path: Path) -> dict[str, ModelShape]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        raise ValueError("model sizes config must be a JSON object")
+        raise ValueError("model shapes config must be a JSON object")
 
-    model_sizes = {}
+    shapes = {}
     for model_name, model_config in data.items():
         if not isinstance(model_config, dict):
-            raise ValueError(f"size config for {model_name!r} must be an object")
-        dimensions = model_config.get("dimensions_m")
-        if not isinstance(dimensions, dict) or set(dimensions) != {"x", "y", "z"}:
-            raise ValueError(
-                f"dimensions_m for {model_name!r} must define exactly x, y, and z"
-            )
-        values = tuple(dimensions[axis] for axis in ("x", "y", "z"))
-        if any(
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not isfinite(value)
-            or value <= 0.0
-            for value in values
+            raise ValueError(f"shape config for {model_name!r} must be an object")
+        body_shape = model_config.get("body_shape")
+        if (
+            not isinstance(body_shape, list)
+            or not body_shape
+            or any(not isinstance(item, str) or not item.strip() for item in body_shape)
         ):
             raise ValueError(
-                f"dimensions_m for {model_name!r} must contain positive finite meters"
+                f"body_shape for {model_name!r} must be a non-empty list of strings"
             )
-        model_sizes[model_name] = tuple(float(value) for value in values)
-    return model_sizes
+        panel_count = model_config.get("solar_panel_count")
+        if (
+            isinstance(panel_count, bool)
+            or not isinstance(panel_count, int)
+            or panel_count < 0
+        ):
+            raise ValueError(
+                f"solar_panel_count for {model_name!r} must be a non-negative integer"
+            )
+        dimensions = model_config.get("dimensions_m")
+        shapes[model_name] = ModelShape(
+            body_shape=tuple(item.strip() for item in body_shape),
+            solar_panel_count=panel_count,
+            dimensions_m=(
+                None
+                if dimensions is None
+                else _parse_dimensions_m(model_name, dimensions)
+            ),
+        )
+    return shapes
+
+
+def require_model_shape(
+    model_name: str, model_shapes: dict[str, ModelShape]
+) -> ModelShape:
+    shape = model_shapes.get(model_name)
+    if shape is None:
+        raise ValueError(
+            f"{model_name!r} has no entry in models/model_shapes.json; "
+            "body_shape and solar_panel_count are required for every model"
+        )
+    return shape
 
 
 def model_axis_scale_factors(
@@ -363,7 +438,7 @@ def model_axis_scale_factors(
 def resolve_model_dimensions(
     model_name: str,
     source_dimensions: tuple[float, float, float],
-    model_sizes: dict[str, tuple[float, float, float]],
+    model_shapes: dict[str, ModelShape],
     scene_meters_per_unit: float,
 ) -> tuple[tuple[float, float, float], tuple[float, float, float], bool]:
     if not isfinite(scene_meters_per_unit) or scene_meters_per_unit <= 0.0:
@@ -371,7 +446,7 @@ def resolve_model_dimensions(
     if any(not isfinite(value) or value < 0.0 for value in source_dimensions):
         raise ValueError("source model dimensions must be finite and non-negative")
 
-    target_dimensions_m = model_sizes.get(model_name)
+    target_dimensions_m = require_model_shape(model_name, model_shapes).dimensions_m
     if target_dimensions_m is None:
         return (
             (1.0, 1.0, 1.0),

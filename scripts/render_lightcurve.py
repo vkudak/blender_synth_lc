@@ -40,6 +40,7 @@ from blender_synth_lc.illumination import (
     SUNLIT,
     UMBRA,
     eclipse_fraction,
+    phase_angle_deg,
     sample_sun_direction,
     shadow_state,
     solar_illumination_fraction,
@@ -58,10 +59,12 @@ from blender_synth_lc.orbit import (
 from blender_synth_lc.config import (
     apply_overrides,
     load_config,
-    load_model_sizes,
+    load_model_shapes,
+    require_model_shape,
     resolve_model_dimensions,
 )
 from blender_synth_lc.jobs import record_completed_curve
+from blender_synth_lc.noise import sample_noisy_flux
 
 
 def parse_args():
@@ -642,6 +645,11 @@ def build_scenario(config, curve_index, model_spin_axes):
         "precession_period_s": precession_period_s,
         "precession_phase_rad": precession_phase_rad_value,
         "precession_active": spin_period_s > 0.0 and precession_angle_deg > 0.0,
+        "model_scale_factor": (
+            rng.uniform(config.model_scale_min, config.model_scale_max)
+            if config.kind == "dataset"
+            else 1.0
+        ),
         "sun_direction": sun_direction,
     }
 
@@ -684,6 +692,14 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
     ]
     solar_fractions = [
         solar_illumination_fraction(sample.position_m, tuple(sun_direction))
+        for sample in samples
+    ]
+    phase_angles_deg = [
+        phase_angle_deg(
+            sample.position_m,
+            observer_position_eci(observer, sample.time_from_closest_approach_s),
+            tuple(sun_direction),
+        )
         for sample in samples
     ]
     eclipsed_flags = [state != SUNLIT for state in shadow_states]
@@ -745,6 +761,14 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
         sample.time_from_closest_approach_s - samples[0].time_from_closest_approach_s
         for sample in samples
     ]
+    noise_seed = f"{args.seed}:{curve_index}:photometric-noise"
+    noise_rng = random.Random(noise_seed)
+    noisy_measurements = [
+        sample_noisy_flux(flux, sample.elevation_deg, args.reference_snr, noise_rng)
+        for sample, flux in zip(samples, relative_flux)
+    ]
+    noisy_relative_flux = [measurement[0] for measurement in noisy_measurements]
+    noise_sigma = [measurement[1] for measurement in noisy_measurements]
     with output_path.open("w", newline="", encoding="utf-8") as output_file:
         writer = csv.writer(output_file)
         writer.writerow((
@@ -752,6 +776,7 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
             "range_m",
             "azimuth_deg",
             "elevation_deg",
+            "phase_angle_deg",
             "visible",
             "eclipsed",
             "shadow_state",
@@ -759,6 +784,8 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
             "render_flux_linear_rgb",
             "flux_with_range_correction",
             "relative_flux",
+            "relative_flux_noisy",
+            "noise_sigma",
         ))
         for (
             sample,
@@ -768,6 +795,9 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
             eclipsed,
             shadow,
             solar_fraction,
+            phase_angle,
+            noisy_flux,
+            sigma,
         ) in zip(
             samples,
             time_from_start_s,
@@ -776,12 +806,16 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
             eclipsed_flags,
             shadow_states,
             solar_fractions,
+            phase_angles_deg,
+            noisy_relative_flux,
+            noise_sigma,
         ):
             writer.writerow((
                 time_s,
                 sample.range_m,
                 sample.azimuth_deg,
                 sample.elevation_deg,
+                phase_angle,
                 int(sample.visible),
                 int(eclipsed),
                 shadow,
@@ -789,6 +823,8 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
                 raw_flux,
                 corrected_flux,
                 corrected_flux / maximum_flux,
+                noisy_flux,
+                sigma,
             ))
 
     plot_path = output_path.with_suffix(".svg")
@@ -804,6 +840,20 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
         "curve_index": curve_index,
         "seed": args.seed,
         "dataset_run_key": args.index_run_key,
+        "phase_angle_convention": (
+            "phase_angle_deg is the angle at the satellite between the vectors "
+            "from satellite to Sun and satellite to observer; 0 degrees is full "
+            "phase and 180 degrees is new phase"
+        ),
+        "noise": {
+            "model": "Gaussian approximation to photon shot noise",
+            "reference_snr": args.reference_snr,
+            "reference_flux": 1.0,
+            "reference_elevation_deg": 90.0,
+            "relative_airmass_model": "Kasten-Young normalized to 1 at zenith",
+            "seed": noise_seed,
+            "sigma_formula": "sqrt(relative_flux * relative_airmass) / reference_snr",
+        },
         "observer": {
             "latitude_deg": observer.latitude_deg,
             "longitude_deg": observer.longitude_deg,
@@ -853,6 +903,9 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
             "max_eclipse_fraction": args.max_eclipse_fraction,
             "camera_ortho_scale_m": camera.data.ortho_scale * args.scene_meters_per_unit,
             "scene_meters_per_unit": args.scene_meters_per_unit,
+            "model_scale_factor": scenario["model_scale_factor"],
+            "body_shape": scenario["body_shape"],
+            "solar_panel_count": scenario["solar_panel_count"],
             "model_dimensions_m": {
                 axis: dimension
                 for axis, dimension in zip("xyz", scenario["model_dimensions_m"])
@@ -862,7 +915,7 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
                 for axis, factor in zip("xyz", scenario["model_axis_scale_factors"])
             },
             "model_dimensions_source": (
-                "models/model_sizes.json"
+                "models/model_shapes.json"
                 if scenario["model_dimensions_calibrated"]
                 else "native Blender bounds (assumed to be correct)"
             ),
@@ -912,7 +965,8 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
 def main():
     args = parse_args()
     model_spin_axes = load_model_spin_axes(REPO_ROOT / "models" / "spin_axes.json")
-    model_sizes = load_model_sizes(REPO_ROOT / "models" / "model_sizes.json")
+    model_shapes = load_model_shapes(REPO_ROOT / "models" / "model_shapes.json")
+    model_shape = require_model_shape(args.model.name, model_shapes)
     if not args.model.is_file():
         raise FileNotFoundError(args.model)
     if Path(bpy.data.filepath).resolve() != args.model.resolve():
@@ -934,7 +988,7 @@ def main():
         resolve_model_dimensions(
             args.model.name,
             source_dimensions,
-            model_sizes,
+            model_shapes,
             args.scene_meters_per_unit,
         )
     )
@@ -975,10 +1029,18 @@ def main():
         if curve_index in args.skip_index:
             continue
         scenario = build_scenario(args, curve_index, model_spin_axes)
-        scenario["model_radius"] = model_radius
-        scenario["model_dimensions_m"] = model_dimensions_m
-        scenario["model_axis_scale_factors"] = model_scale
+        scale_factor = scenario["model_scale_factor"]
+        satellite_root.scale = tuple(factor * scale_factor for factor in model_scale)
+        scenario["model_radius"] = model_radius * scale_factor
+        scenario["model_dimensions_m"] = tuple(
+            dimension * scale_factor for dimension in model_dimensions_m
+        )
+        scenario["model_axis_scale_factors"] = tuple(
+            factor * scale_factor for factor in model_scale
+        )
         scenario["model_dimensions_calibrated"] = model_dimensions_calibrated
+        scenario["body_shape"] = list(model_shape.body_shape)
+        scenario["solar_panel_count"] = model_shape.solar_panel_count
         write_curve_files(
             args, curve_index, scenario, satellite_root, meshes, device, scene, camera, light
         )

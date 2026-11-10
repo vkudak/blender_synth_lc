@@ -86,7 +86,7 @@ def test_blender_command_saves_and_uses_configured_runner(tmp_path):
     assert "bmesh.ops.create_uvsphere(" in render_source
     assert "bpy.context.object" not in render_source
     assert "scene.unit_settings.scale_length = args.scene_meters_per_unit" in render_source
-    assert 'load_model_sizes(REPO_ROOT / "models" / "model_sizes.json")' in render_source
+    assert 'load_model_shapes(REPO_ROOT / "models" / "model_shapes.json")' in render_source
     assert "args.satellite_size_m" not in render_source
     assert "light.location = sun_position - sample_position" in render_source
     assert "scene_units_per_m = 1.0 / args.scene_meters_per_unit" in render_source

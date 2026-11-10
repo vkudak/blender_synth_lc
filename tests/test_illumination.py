@@ -3,6 +3,7 @@ from random import Random
 from blender_synth_lc.illumination import (
     eclipse_fraction,
     is_eclipsed,
+    phase_angle_deg,
     sample_sun_direction,
     shadow_state,
     solar_illumination_fraction,
@@ -63,6 +64,24 @@ def test_umbra_and_sunlight_have_expected_illumination_fractions():
 
 def test_sun_direction_sampling_is_seeded():
     assert sample_sun_direction(Random(7)) == sample_sun_direction(Random(7))
+
+
+def test_phase_angle_is_zero_for_full_phase():
+    angle = phase_angle_deg((0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 0.0))
+
+    assert angle == 0.0
+
+
+def test_phase_angle_is_ninety_degrees_for_quadrature():
+    angle = phase_angle_deg((0.0, 0.0, 0.0), (0.0, 1.0, 0.0), (1.0, 0.0, 0.0))
+
+    assert angle == 90.0
+
+
+def test_phase_angle_is_180_degrees_for_new_phase():
+    angle = phase_angle_deg((0.0, 0.0, 0.0), (-1.0, 0.0, 0.0), (1.0, 0.0, 0.0))
+
+    assert angle == 180.0
 
 
 def test_sunlit_pass_requires_at_least_one_visible_sample():
