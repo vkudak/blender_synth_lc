@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import asdict
 import hashlib
 import os
@@ -252,17 +253,19 @@ def _write_render_script(path: Path, render_args: list[str]) -> None:
     path.write_text(source, encoding="utf-8")
 
 
-def run_blender(command: list[str], on_progress=None) -> int:
+def run_blender(command: list[str], on_progress=None, log_file: Path | None = None) -> int:
     print(" ".join(command), flush=True)
-    if on_progress is None:
-        return subprocess.run(command, check=False).returncode
+    with log_file.open("ab") if log_file is not None else nullcontext() as log:
+        stderr = subprocess.STDOUT if log is not None else None
+        if on_progress is None:
+            return subprocess.run(command, check=False, stdout=log, stderr=stderr).returncode
 
-    with subprocess.Popen(command) as process:
-        while True:
-            on_progress()
-            try:
-                returncode = process.wait(timeout=0.2)
-            except subprocess.TimeoutExpired:
-                continue
-            on_progress()
-            return returncode
+        with subprocess.Popen(command, stdout=log, stderr=stderr) as process:
+            while True:
+                on_progress()
+                try:
+                    returncode = process.wait(timeout=0.2)
+                except subprocess.TimeoutExpired:
+                    continue
+                on_progress()
+                return returncode

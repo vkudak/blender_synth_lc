@@ -90,7 +90,7 @@ def parse_args():
         parser.error("--index-file and --index-run-key must be provided together")
 
     config = load_config(cli_args.config, kind=cli_args.kind)
-    return apply_overrides(
+    config = apply_overrides(
         config,
         model=cli_args.model.resolve(),
         output=cli_args.output.resolve() if cli_args.output is not None else None,
@@ -99,6 +99,7 @@ def parse_args():
         seed=cli_args.seed,
         device=cli_args.device,
     )
+    return config, cli_args
 
 
 def configure_device(scene, requested_device):
@@ -654,7 +655,10 @@ def build_scenario(config, curve_index, model_spin_axes):
     }
 
 
-def write_curve_files(args, curve_index, scenario, satellite_root, meshes, device, scene, camera, light):
+def write_curve_files(
+    args, curve_index, scenario, satellite_root, meshes, device, scene, camera, light,
+    index_run_key,
+):
     samples = scenario["samples"]
     if any(not sample.visible for sample in samples):
         raise RuntimeError("Selected pass contains samples below the observer elevation mask")
@@ -839,7 +843,7 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
         "mesh_objects": [mesh.name for mesh in meshes],
         "curve_index": curve_index,
         "seed": args.seed,
-        "dataset_run_key": args.index_run_key,
+        "dataset_run_key": index_run_key,
         "phase_angle_convention": (
             "phase_angle_deg is the angle at the satellite between the vectors "
             "from satellite to Sun and satellite to observer; 0 degrees is full "
@@ -963,7 +967,7 @@ def write_curve_files(args, curve_index, scenario, satellite_root, meshes, devic
 
 
 def main():
-    args = parse_args()
+    args, cli_args = parse_args()
     model_spin_axes = load_model_spin_axes(REPO_ROOT / "models" / "spin_axes.json")
     model_shapes = load_model_shapes(REPO_ROOT / "models" / "model_shapes.json")
     model_shape = require_model_shape(args.model.name, model_shapes)
@@ -1026,7 +1030,7 @@ def main():
     )
 
     for curve_index in range(args.count):
-        if curve_index in args.skip_index:
+        if curve_index in cli_args.skip_index:
             continue
         scenario = build_scenario(args, curve_index, model_spin_axes)
         scale_factor = scenario["model_scale_factor"]
@@ -1042,12 +1046,13 @@ def main():
         scenario["body_shape"] = list(model_shape.body_shape)
         scenario["solar_panel_count"] = model_shape.solar_panel_count
         write_curve_files(
-            args, curve_index, scenario, satellite_root, meshes, device, scene, camera, light
+            args, curve_index, scenario, satellite_root, meshes, device, scene, camera, light,
+            cli_args.index_run_key,
         )
-        if args.index_file is not None:
+        if cli_args.index_file is not None:
             record_completed_curve(
-                args.index_file,
-                args.index_run_key,
+                cli_args.index_file,
+                cli_args.index_run_key,
                 args.model,
                 curve_index,
             )

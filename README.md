@@ -9,13 +9,15 @@ The host-side Python scripts read INI configuration, select models and seeds, th
 Main components:
 
 - `scripts/generate_curve.py`: render one curve for one model.
-- `scripts/generate_dataset.py`: render a batch for selected or discovered models.
+- `scripts/generate_dataset.py`: render a batch for selected or discovered models (with optional parallel processing).
 - `scripts/render_lightcurve.py`: Blender-side scenario generation, rendering, and output.
 - `scripts/audit_models.py` and `scripts/inspect_blend.py`: inspect `.blend` assets and report scene/object information.
 - `src/blender_synth_lc/`: configuration, orbit, attitude, illumination, and Blender job helpers.
 - `config/curve.ini` and `config/dataset.ini`: example configurations.
 
 The initial implementation targets Blender 4.5 LTS and uses the Blender 4.5 Python API. The installed and tested executable is Blender 4.5.15 LTS. See the [Blender 4.5 API documentation](https://docs.blender.org/api/4.5/) when changing Blender integration.
+
+**For accelerated dataset generation with multiple parallel Blender processes, see the [parallel generation guide](docs/PARALLEL_GENERATION_GUIDE.md).**
 
 ## Requirements and Setup
 
@@ -85,6 +87,7 @@ Edit `config/dataset.ini`, then run:
 --total-curves N     Override [dataset] total_curves (default 10000)
 --seed INTEGER       Override [run] seed
 --device DEVICE      auto, cpu, cuda, or optix
+--workers N          Override [dataset] workers (number of parallel Blender processes)
 ```
 
 Example smoke run:
@@ -98,11 +101,45 @@ Example smoke run:
   --device cpu
 ```
 
+### Parallel Dataset Generation
+
+Dataset generation supports running multiple Blender processes in parallel to accelerate rendering. The `workers` parameter can be set in the configuration file or overridden via the command line:
+
+**In config file (config/dataset.ini):**
+```ini
+[dataset]
+workers = 4
+```
+
+**Or via command line:**
+```bash
+.venv/bin/python scripts/generate_dataset.py \
+  --config config/dataset.ini \
+  --total-curves 4000 \
+  --workers 4 \
+  --device cuda
+```
+
+**Windows PowerShell:**
+```powershell
+.venv\Scripts\python scripts/generate_dataset.py `
+  --config config/dataset.ini `
+  --total-curves 8000 `
+  --workers 4 `
+  --device cuda
+```
+
+The `workers` parameter defaults to 1 (sequential processing). Recommended values are 3-4 depending on available system resources (CPU cores, GPU memory). Each worker runs an independent Blender process, so ensure sufficient system memory (typically 2-4 GB per process for CUDA renders). Results from all workers are coordinated through a shared index file (`.dataset_indexes.jsonl`), allowing safe resumption and incremental runs.
+
 If `[paths] models` is empty, every `.blend` in `models_dir` is selected except entries in `skip_models`. If it is non-empty, it is an explicit comma-separated selection. CLI `--model` values are names resolved under `models_dir` (unless an absolute path is supplied); the option may be repeated. Before rendering, dataset generation inspects every selected model with Blender. If any mesh object has zero evaluated vertices, it warns with the model and object names and stops before creating the output directory or rendering; the user must repair or remove the affected model. Dataset filenames contain the model stem, seed, zero-based curve index, and a unique random token; the index restarts for each model. Each curve also has JSON and SVG sidecars.
 
 Dataset runs are resumable. The output directory contains a hidden `.dataset_indexes.jsonl` journal that records each curve index only after its CSV, JSON, and SVG have been written. Re-running with the same settings, models, and seed skips recorded curves and continues missing indexes. Increasing `total_curves` continues at the new indexes. A changed configuration, model file, or seed gets a separate index entry. Use `--force_indexes` (or `--force-indexes`) to delete the saved indexes and regenerate all requested curves. This removes only the index file; existing outputs are kept, and regenerated curves get new filenames.
 
-Dataset generation displays completed-curve progress on stderr. Blender's stdout and stderr remain connected to the console, so its diagnostics and traceback are visible if a run fails.
+Dataset generation displays completed-curve progress using a progress bar (tqdm) on stderr. Blender's stdout and stderr are appended to `blender.log` in the configured output directory; reruns retain earlier logs, so the file can grow over time. Failed model runs report the log location on the console. Model validation errors remain visible on the console, and single-curve generation keeps Blender output on the console. To monitor the dataset log in PowerShell, use:
+
+```powershell
+Get-Content reports\dataset\blender.log -Wait -Tail 20
+```
 
 `total_curves` is the total number of curves across all selected models. The runner divides this total as evenly as possible; model counts differ by at most one, with any remainder assigned to the first models in selection order. Automatically discovered models are sorted by filename. The total must be at least the number of selected models so every model receives at least one curve. A model's base seed is offset by 10,000 for each model in the selection; the curve index is added within that model.
 

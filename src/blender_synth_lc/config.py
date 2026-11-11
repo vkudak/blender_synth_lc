@@ -38,6 +38,7 @@ class SynthConfig:
     seed: int
     device: str
     count: int
+    workers: int
     observer_mode: str
     latitude_deg: float
     longitude_deg: float
@@ -272,6 +273,12 @@ def load_config(path: Path, kind: str) -> SynthConfig:
         )
         minimum_elevation_deg = MINIMUM_ELEVATION_FLOOR_DEG
 
+    workers = 1
+    if kind == "dataset":
+        workers = getint("dataset", "workers", 1)
+        if workers < 1:
+            raise ValueError("dataset.workers must be at least 1")
+
     config = SynthConfig(
         kind=kind,
         config_path=config_path,
@@ -285,6 +292,7 @@ def load_config(path: Path, kind: str) -> SynthConfig:
         seed=getint("run", "seed", 42),
         device=device,
         count=count,
+        workers=workers,
         observer_mode=observer_mode,
         latitude_deg=getfloat("observer", "latitude_deg", 48.633),
         longitude_deg=getfloat("observer", "longitude_deg", 22.33),

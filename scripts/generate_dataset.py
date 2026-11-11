@@ -3,6 +3,7 @@
 import argparse
 import json
 import sys
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from pathlib import Path
 
 from tqdm import tqdm
@@ -35,6 +36,11 @@ def parse_arguments():
     parser.add_argument("--seed", type=int)
     parser.add_argument("--total-curves", type=int)
     parser.add_argument(
+        "--workers",
+        type=int,
+        help="Number of parallel Blender processes (overrides [dataset] workers from config).",
+    )
+    parser.add_argument(
         "--force_indexes",
         "--force-indexes",
         action="store_true",
@@ -53,6 +59,50 @@ def distribute_curve_counts(total_curves: int, model_count: int) -> tuple[int, .
         curves_per_model + (model_index < remainder)
         for model_index in range(model_count)
     )
+
+
+def _run_model_batch(
+    config,
+    model,
+    model_index,
+    model_count,
+    seed,
+    index_file,
+    output_dir,
+    device,
+    log_file,
+):
+    """Worker function to process one model batch. Called by multiprocessing."""
+    model_seed = seed + 10_000 * model_index
+    run_key = dataset_run_key(config, model, model_seed)
+    completed = completed_curve_indices(index_file, run_key, model)
+    skip_indices = tuple(
+        curve_index for curve_index in completed if curve_index < model_count
+    )
+
+    if len(skip_indices) == model_count:
+        return (model.name, model_count, 0, 0, True)
+
+    returncode = run_blender(
+        blender_command(
+            config,
+            model,
+            count=model_count,
+            seed=model_seed,
+            output_dir=output_dir,
+            device=device,
+            skip_indices=skip_indices,
+            index_file=index_file,
+            index_run_key=run_key,
+        ),
+        on_progress=None,
+        log_file=log_file,
+    )
+
+    completed_after = completed_curve_indices(index_file, run_key, model)
+    newly_completed = len([i for i in completed_after if i not in completed])
+
+    return (model.name, model_count, newly_completed, returncode, returncode == 0)
 
 
 def _curve_progress_callback(
@@ -115,6 +165,7 @@ def main():
         device=args.device,
         seed=args.seed,
         count=args.total_curves,
+        workers=args.workers,
     )
     models = usable_models(config)
     try:
@@ -142,48 +193,122 @@ def main():
 
     config.output_dir.mkdir(parents=True, exist_ok=True)
     index_file = dataset_index_path(config.output_dir)
+    blender_log = config.output_dir / "blender.log"
     if args.force_indexes:
         clear_dataset_indexes(index_file)
         print(f"Cleared dataset indexes: {index_file}")
 
+    print(f"Blender logs will be saved to: {blender_log}")
+    print(f"Running with {config.workers} parallel worker(s)")
+
     failures = 0
     with tqdm(total=config.count, desc="Dataset", unit="curve", file=sys.stderr) as progress:
-        for model_index, (model, model_count) in enumerate(zip(models, curve_counts)):
-            progress.set_postfix_str(f"{model.name}: {model_count} curves", refresh=True)
-            model_seed = config.seed + 10_000 * model_index
-            run_key = dataset_run_key(config, model, model_seed)
-            completed = completed_curve_indices(index_file, run_key, model)
-            skip_indices = tuple(
-                curve_index for curve_index in completed if curve_index < model_count
-            )
-            progress.update(len(skip_indices))
-            if len(skip_indices) == model_count:
-                print(f"SKIP {model.name}: all {model_count} curve indexes are complete")
-                continue
-            returncode = run_blender(
-                blender_command(
-                    config,
-                    model,
-                    count=model_count,
-                    seed=model_seed,
-                    output_dir=config.output_dir,
-                    device=config.device,
-                    skip_indices=skip_indices,
-                    index_file=index_file,
-                    index_run_key=run_key,
-                ),
-                on_progress=_curve_progress_callback(
-                    index_file,
-                    run_key,
-                    model,
-                    model_count,
-                    skip_indices,
-                    progress,
-                ),
-            )
-            if returncode != 0:
-                failures += 1
-                print(f"FAIL {model.name} (exit {returncode})", file=sys.stderr)
+        if config.workers == 1:
+            for model_index, (model, model_count) in enumerate(zip(models, curve_counts)):
+                progress.set_postfix_str(f"{model.name}: {model_count} curves", refresh=True)
+                model_seed = config.seed + 10_000 * model_index
+                run_key = dataset_run_key(config, model, model_seed)
+                completed = completed_curve_indices(index_file, run_key, model)
+                skip_indices = tuple(
+                    curve_index for curve_index in completed if curve_index < model_count
+                )
+                progress.update(len(skip_indices))
+                if len(skip_indices) == model_count:
+                    print(f"SKIP {model.name}: all {model_count} curve indexes are complete")
+                    continue
+                returncode = run_blender(
+                    blender_command(
+                        config,
+                        model,
+                        count=model_count,
+                        seed=model_seed,
+                        output_dir=config.output_dir,
+                        device=config.device,
+                        skip_indices=skip_indices,
+                        index_file=index_file,
+                        index_run_key=run_key,
+                    ),
+                    on_progress=_curve_progress_callback(
+                        index_file,
+                        run_key,
+                        model,
+                        model_count,
+                        skip_indices,
+                        progress,
+                    ),
+                    log_file=blender_log,
+                )
+                if returncode != 0:
+                    failures += 1
+                    print(
+                        f"FAIL {model.name} (exit {returncode}); see {blender_log}",
+                        file=sys.stderr,
+                    )
+        else:
+            jobs = []
+            progress_callbacks = []
+            for model_index, (model, model_count) in enumerate(zip(models, curve_counts)):
+                model_seed = config.seed + 10_000 * model_index
+                run_key = dataset_run_key(config, model, model_seed)
+                completed = completed_curve_indices(index_file, run_key, model)
+                skip_indices = tuple(
+                    curve_index for curve_index in completed if curve_index < model_count
+                )
+                progress.update(len(skip_indices))
+                if len(skip_indices) == model_count:
+                    print(f"SKIP {model.name}: all {model_count} curve indexes are complete")
+                    continue
+                jobs.append((model_index, model, model_count))
+                progress_callbacks.append(
+                    _curve_progress_callback(
+                        index_file,
+                        run_key,
+                        model,
+                        model_count,
+                        skip_indices,
+                        progress,
+                    )
+                )
+
+            with ProcessPoolExecutor(max_workers=config.workers) as executor:
+                futures = {}
+                for model_index, model, model_count in jobs:
+                    future = executor.submit(
+                        _run_model_batch,
+                        config,
+                        model,
+                        model_index,
+                        model_count,
+                        config.seed,
+                        index_file,
+                        config.output_dir,
+                        config.device,
+                        blender_log,
+                    )
+                    futures[future] = (model_index, model.name, model_count)
+
+                while futures:
+                    for update_progress in progress_callbacks:
+                        update_progress()
+                    completed_futures, _ = wait(
+                        futures,
+                        timeout=0.2,
+                        return_when=FIRST_COMPLETED,
+                    )
+                    for future in completed_futures:
+                        model_index, model_name, model_count = futures.pop(future)
+                        try:
+                            model_name, requested_count, completed_count, returncode, success = future.result()
+                            if success and returncode == 0:
+                                print(f"DONE {model_name}: completed {completed_count} curves")
+                            else:
+                                failures += 1
+                                print(f"FAIL {model_name} (exit {returncode}); see {blender_log}", file=sys.stderr)
+                        except Exception as error:
+                            failures += 1
+                            print(f"ERROR in worker for {model_name}: {error}", file=sys.stderr)
+                for update_progress in progress_callbacks:
+                    update_progress()
 
     if failures:
         print(f"Completed with {failures} failed model runs.", file=sys.stderr)

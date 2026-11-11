@@ -1,8 +1,10 @@
 from dataclasses import replace
 import json
 from pathlib import Path
+import sys
 
 import blender_synth_lc.jobs as jobs
+import pytest
 
 from blender_synth_lc.config import PROJECT_ROOT, load_config
 from blender_synth_lc.jobs import (
@@ -14,9 +16,46 @@ from blender_synth_lc.jobs import (
     dataset_run_key,
     find_empty_meshes,
     record_completed_curve,
+    run_blender,
 )
 
 
+@pytest.mark.parametrize("with_progress", [False, True])
+def test_run_blender_redirects_both_streams_and_appends(tmp_path, capfd, with_progress):
+    log_file = tmp_path / "blender.log"
+    log_file.write_bytes(b"previous run\n")
+    command = [
+        sys.executable,
+        "-c",
+        "import sys; print('child stdout'); print('child stderr', file=sys.stderr); sys.exit(7)",
+    ]
+    updates = []
+    callback = (lambda: updates.append(True)) if with_progress else None
+
+    assert run_blender(command, on_progress=callback, log_file=log_file) == 7
+
+    log = log_file.read_text(encoding="utf-8")
+    assert log.startswith("previous run\n")
+    assert "child stdout" in log
+    assert "child stderr" in log
+    stdout, stderr = capfd.readouterr()
+    assert "child stdout" not in stdout.splitlines()
+    assert "child stderr" not in stderr.splitlines()
+    assert bool(updates) == with_progress
+
+
+def test_run_blender_inherits_console_without_log(capfd):
+    command = [
+        sys.executable,
+        "-c",
+        "import sys; print('visible stdout'); print('visible stderr', file=sys.stderr)",
+    ]
+
+    assert run_blender(command) == 0
+
+    stdout, stderr = capfd.readouterr()
+    assert "visible stdout" in stdout.splitlines()
+    assert "visible stderr" in stderr.splitlines()
 def test_find_empty_meshes_reports_empty_objects_for_all_selected_models(
     tmp_path, monkeypatch
 ):
