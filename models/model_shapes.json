@@ -24,5 +24,10 @@
     "SSL-1300.blend": {"body_shape": ["cube"], "solar_panel_count": 2},
     
     "TESS.blend": {"body_shape": ["cube"], "solar_panel_count": 2},
-    "Vehicle.blend": {"body_shape": ["cylinder"], "solar_panel_count": 0}
+    "Vehicle.blend": {"body_shape": ["cylinder"], "solar_panel_count": 0},
+
+    "SWAS.blend": {"body_shape": ["cylinder"], "solar_panel_count": 2},
+    "SAC-C.blend": {"body_shape": ["cylinder"], "solar_panel_count": 2},
+    "Jason_1.blend": {"body_shape": ["cube"], "solar_panel_count": 2},
+    "Ares_1.blend": {"body_shape": ["cylinder"], "solar_panel_count": 0}
 }
