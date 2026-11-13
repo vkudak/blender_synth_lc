@@ -76,6 +76,12 @@ class SynthConfig:
     model_scale_min: float
     model_scale_max: float
     reference_snr: float
+    bias_level: float
+    readout_noise_std: float
+    correlated_noise_std: float
+    correlation_time_s: float
+    saturation_level: float
+    adc_bits: int
     sun_mode: str
     sun_direction: tuple[float, float, float]
     sun_energy: float
@@ -139,11 +145,33 @@ def load_config(path: Path, kind: str) -> SynthConfig:
     )
     scene_meters_per_unit = getfloat("render", "scene_meters_per_unit", 1.0)
     reference_snr = getfloat("noise", "reference_snr", 50.0)
+    bias_level = getfloat("noise", "bias_level", 0.0)
+    readout_noise_std = getfloat("noise", "readout_noise_std", 0.0)
+    correlated_noise_std = getfloat("noise", "correlated_noise_std", 0.0)
+    correlation_time_s = getfloat("noise", "correlation_time_s", 0.0)
+    saturation_level = getfloat("noise", "saturation_level", 0.0)
+    adc_bits = getint("noise", "adc_bits", 0)
     max_eclipse_fraction = getfloat("sun", "max_eclipse_fraction", 0.15)
     if scene_meters_per_unit <= 0.0:
         raise ValueError("render.scene_meters_per_unit must be positive")
     if not isfinite(reference_snr) or reference_snr <= 0.0:
         raise ValueError("noise.reference_snr must be finite and positive")
+    if not isfinite(bias_level) or not 0.0 <= bias_level <= 1.0:
+        raise ValueError("noise.bias_level must be finite and in [0, 1]")
+    if not isfinite(readout_noise_std) or readout_noise_std < 0.0:
+        raise ValueError("noise.readout_noise_std must be finite and non-negative")
+    if not isfinite(correlated_noise_std) or correlated_noise_std < 0.0:
+        raise ValueError("noise.correlated_noise_std must be finite and non-negative")
+    if not isfinite(correlation_time_s) or correlation_time_s < 0.0:
+        raise ValueError("noise.correlation_time_s must be finite and non-negative")
+    if correlated_noise_std > 0.0 and correlation_time_s <= 0.0:
+        raise ValueError(
+            "noise.correlation_time_s must be positive when correlated_noise_std > 0"
+        )
+    if not isfinite(saturation_level) or saturation_level < 0.0:
+        raise ValueError("noise.saturation_level must be finite and non-negative")
+    if adc_bits != 0 and not 2 <= adc_bits <= 24:
+        raise ValueError("noise.adc_bits must be 0 (disabled) or in [2, 24]")
     if not 0.0 <= max_eclipse_fraction < 1.0:
         raise ValueError("sun.max_eclipse_fraction must be in [0, 1)")
     selected_models = _split_list(get("paths", "models", fallback=""))
@@ -402,6 +430,12 @@ def load_config(path: Path, kind: str) -> SynthConfig:
         model_scale_min=model_scale_min,
         model_scale_max=model_scale_max,
         reference_snr=reference_snr,
+        bias_level=bias_level,
+        readout_noise_std=readout_noise_std,
+        correlated_noise_std=correlated_noise_std,
+        correlation_time_s=correlation_time_s,
+        saturation_level=saturation_level,
+        adc_bits=adc_bits,
         sun_mode=sun_mode,
         sun_direction=(
             getfloat("sun", "x", 0.71),

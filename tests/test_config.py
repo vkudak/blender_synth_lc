@@ -34,6 +34,12 @@ def test_dataset_config_loads_precession_settings():
     assert config.model_scale_min == 1.0
     assert config.model_scale_max == 1.5
     assert config.reference_snr == 50.0
+    assert config.bias_level == 0.01
+    assert config.readout_noise_std == 0.005
+    assert config.correlated_noise_std == 0.003
+    assert config.correlation_time_s == 5.0
+    assert config.saturation_level == 1.05
+    assert config.adc_bits == 12
 
 
 def test_curve_config_loads_reference_snr():
@@ -87,6 +93,44 @@ def test_invalid_reference_snr_is_rejected(tmp_path, value):
     )
 
     with pytest.raises(ValueError, match="noise.reference_snr must be finite and positive"):
+        load_config(config_path, kind="dataset")
+
+
+@pytest.mark.parametrize("value", ("-0.1", "1.1", "nan"))
+def test_invalid_bias_level_is_rejected(tmp_path, value):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(
+        source.replace("bias_level = 0.01", f"bias_level = {value}"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"noise.bias_level must be finite and in \[0, 1\]"):
+        load_config(config_path, kind="dataset")
+
+
+def test_correlated_noise_requires_positive_correlation_time(tmp_path):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(
+        source.replace("correlation_time_s = 5", "correlation_time_s = 0"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="noise.correlation_time_s must be positive"):
+        load_config(config_path, kind="dataset")
+
+
+@pytest.mark.parametrize("value", ("-1", "1", "25"))
+def test_invalid_adc_bits_is_rejected(tmp_path, value):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(
+        source.replace("adc_bits = 12", f"adc_bits = {value}"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"noise.adc_bits must be 0 \(disabled\) or in \[2, 24\]"):
         load_config(config_path, kind="dataset")
 
 

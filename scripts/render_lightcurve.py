@@ -65,7 +65,7 @@ from blender_synth_lc.config import (
     resolve_model_dimensions,
 )
 from blender_synth_lc.jobs import record_completed_curve
-from blender_synth_lc.noise import sample_noisy_flux
+from blender_synth_lc.noise import SensorChain, SensorResponse, sample_noisy_flux
 
 
 def parse_args():
@@ -799,10 +799,29 @@ def write_curve_files(
     ]
     noise_seed = f"{args.seed}:{curve_index}:photometric-noise"
     noise_rng = random.Random(noise_seed)
-    noisy_measurements = [
-        sample_noisy_flux(flux, sample.elevation_deg, args.reference_snr, noise_rng)
-        for sample, flux in zip(samples, relative_flux)
-    ]
+    sensor_response = SensorResponse(
+        bias_level=args.bias_level,
+        readout_noise_std=args.readout_noise_std,
+        correlated_noise_std=args.correlated_noise_std,
+        correlation_time_s=args.correlation_time_s,
+        saturation_level=args.saturation_level,
+        adc_bits=args.adc_bits,
+    )
+    if sensor_response.enabled:
+        sensor_chain = SensorChain(sensor_response, noise_rng)
+        sample_dts_s = [b - a for a, b in zip(time_from_start_s, time_from_start_s[1:])]
+        sample_dts_s.insert(0, sample_dts_s[0] if sample_dts_s else args.cadence_s)
+        noisy_measurements = [
+            sensor_chain.measure(
+                flux, sample.elevation_deg, args.reference_snr, dt_s
+            )
+            for sample, flux, dt_s in zip(samples, relative_flux, sample_dts_s)
+        ]
+    else:
+        noisy_measurements = [
+            sample_noisy_flux(flux, sample.elevation_deg, args.reference_snr, noise_rng)
+            for sample, flux in zip(samples, relative_flux)
+        ]
     noisy_relative_flux = [measurement[0] for measurement in noisy_measurements]
     noise_sigma = [measurement[1] for measurement in noisy_measurements]
     with output_path.open("w", newline="", encoding="utf-8") as output_file:
@@ -890,6 +909,23 @@ def write_curve_files(
             "relative_airmass_model": "Kasten-Young normalized to 1 at zenith",
             "seed": noise_seed,
             "sigma_formula": "sqrt(relative_flux * relative_airmass) / reference_snr",
+            "combined_sigma_formula": (
+                "sqrt(shot_sigma^2 + readout_noise_std^2 + correlated_noise_std^2)"
+            ),
+            "sensor_response": {
+                "enabled": sensor_response.enabled,
+                "bias_level": args.bias_level,
+                "readout_noise_std": args.readout_noise_std,
+                "correlated_noise_std": args.correlated_noise_std,
+                "correlation_time_s": args.correlation_time_s,
+                "correlated_noise_model": (
+                    "AR(1): x[t] = phi * x[t-1] + std * sqrt(1 - phi^2) * N(0, 1), "
+                    "phi = exp(-dt / correlation_time_s)"
+                ),
+                "saturation_level": args.saturation_level,
+                "adc_bits": args.adc_bits,
+                "units": "normalized flux (curve maximum = 1.0)",
+            },
         },
         "observer": {
             "latitude_deg": observer.latitude_deg,

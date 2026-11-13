@@ -22,12 +22,13 @@ Roadmap items for the Blender Synthetic Light Curves project. Items are ordered 
 
 ## Long Term
 
-- [ ] **Hardware-in-the-loop realism** — Enhanced sensor response for ML training:
+- [x] **Hardware-in-the-loop realism** — Enhanced sensor response for ML training:
   - Detector bit-depth quantization (e.g., 12-bit or 16-bit ADC)
   - Small baseline offset (detector bias/dark current) per frame
-  - Time-correlated noise (frame-to-frame correlation for realistic sensor behavior)
-  - Keep existing elevation-dependent noise ✓
-  - Optional: saturation clipping, readout noise, cosmic rays
+  - Time-correlated noise (AR(1) frame-to-frame correlation for realistic sensor behavior)
+  - Elevation-dependent shot noise retained ✓
+  - Saturation clipping and readout noise included; cosmic rays intentionally omitted
+  - Documented in `docs/SENSOR_NOISE_MODEL.md`
 - [ ] **Monochrome sensor and filters** — Integrate linear RGB renders into single sensor-weighted flux per sample with configurable filter responses (optional; when `filter_type=None`, output flux as current RGB-based behavior).
   - Define filter config: `[sensor] filter_type = V-band | custom | None`
   - RGB weight factors: `rgb_weights = w_R, w_G, w_B` (sum to 1.0)

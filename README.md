@@ -228,8 +228,13 @@ Earth occultation uses a conical shadow with the finite angular disk of the Sun.
 ### `[noise]`
 
 - `reference_snr`: signal-to-noise ratio for normalized flux `1` at `90 deg` elevation; default `50`. This defines the reference 1-sigma uncertainty as `1 / reference_snr`.
+- `bias_level`: constant detector bias/dark offset added to every sample, in normalized-flux units; default `0` (disabled).
+- `readout_noise_std`: per-sample Gaussian readout noise 1-sigma; default `0`.
+- `correlated_noise_std` and `correlation_time_s`: frame-to-frame AR(1) correlated noise amplitude and its correlation time in seconds; both default to `0` (white noise).
+- `saturation_level`: full-well clipping level; default `0` (disabled).
+- `adc_bits`: ADC quantization bit depth (for example `12` or `16`); default `0` (disabled).
 
-The initial measurement-noise model is a Gaussian approximation to photon shot noise. For normalized clean flux `f` and elevation `e`, it calculates relative airmass with the Kasten-Young formula, normalized to exactly `1` at zenith: `X(e) = [sin(e) + 0.50572 * (e + 6.07995)^(-1.6364)]^(-1) / X(90 deg)`. The absolute uncertainty in normalized-flux units is `sigma = sqrt(f * X(e)) / reference_snr`, and the noisy value is sampled from `Normal(f, sigma)`. Thus fainter points and lower elevations have larger relative uncertainty; noise has zero mean and the clean `relative_flux` remains unchanged. This first model omits sky background, read noise, extinction of the mean signal, and absolute brightness differences between objects. The noise seed is separate and deterministic for each curve.
+The baseline noise model is a Gaussian approximation to photon shot noise, scaled by Kasten-Young relative airmass so that fainter points and lower elevations have larger relative uncertainty; the clean `relative_flux` remains unchanged. On top of it, the optional detector stages form a sensor pipeline: correlated noise, readout noise, bias, saturation clipping, and ADC quantization, all in normalized-flux units. See [Sensor Noise Model](docs/SENSOR_NOISE_MODEL.md) for formulas, parameter semantics, and edge cases. The noise seed is separate and deterministic for each curve.
 
 The render uses Cycles, denoising, AgX, a black background, a close-up orthographic camera, and a Sun light. Existing cameras and lights in the model are hidden from rendering. Every model must be listed in `models/model_shapes.json` with its shape metadata; optional per-model physical dimensions can be configured there, and models without `dimensions_m` are used at their native Blender bounds, assumed to already be correct.
 
@@ -330,8 +335,8 @@ The CSV columns are:
 - `render_flux_linear_rgb`: sum of linear RGB render pixels before range correction.
 - `flux_with_range_correction`: raw render flux multiplied by `(reference_range / current_range)^2`.
 - `relative_flux`: corrected flux normalized to the largest value in the curve.
-- `relative_flux_noisy`: clean normalized flux plus a seeded Gaussian noise sample; values are not clipped, so a noisy measurement may be negative.
-- `noise_sigma`: per-sample absolute 1-sigma uncertainty in normalized-flux units.
+- `relative_flux_noisy`: clean normalized flux plus the seeded noise sample and any enabled sensor effects (bias, correlated/readout noise, saturation clipping, ADC quantization). Without sensor effects values are not clipped and may be negative; with `adc_bits` set they are non-negative and discrete.
+- `noise_sigma`: per-sample combined absolute 1-sigma uncertainty in normalized-flux units: shot, readout, and correlated components added in quadrature.
 
 The JSON sidecar records the model, seed, observer, orbit, retained pass, attitude/precession, Blender version/device/render settings, sampled model scale factor, final dimensions, eclipse fraction, and limitations. The SVG displays normalized relative flux against time.
 
