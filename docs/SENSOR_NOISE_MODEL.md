@@ -3,6 +3,12 @@
 This page describes the measurement-noise pipeline applied to every rendered
 light curve, including the optional hardware-in-the-loop detector effects.
 
+The noise pipeline operates on the scalar flux produced by the optional
+`[sensor]` photometric filter (a per-pixel weighted sum of the linear RGB
+render channels, see [Photometric Filters](PHOTOMETRIC_FILTERS.md)). Filtering
+happens before normalization and noise; it changes the clean curve shape, not
+the noise behavior.
+
 ## Units
 
 All flux levels are in **normalized-flux units**: the clean range-corrected

@@ -10,6 +10,7 @@ from pathlib import Path
 import warnings
 
 from . import MIN_ROTATION_PERIOD_S, ROTATION_PERIOD_CUTOFF_S
+from .photometry import resolve_sensor_filter
 from .orbit import (
     DEFAULT_MINIMUM_ELEVATION_DEG,
     MAX_ORBIT_ALTITUDE_M,
@@ -82,6 +83,8 @@ class SynthConfig:
     correlation_time_s: float
     saturation_level: float
     adc_bits: int
+    filter_type: str
+    rgb_weights: tuple[float, float, float] | None
     sun_mode: str
     sun_direction: tuple[float, float, float]
     sun_energy: float
@@ -151,6 +154,10 @@ def load_config(path: Path, kind: str) -> SynthConfig:
     correlation_time_s = getfloat("noise", "correlation_time_s", 0.0)
     saturation_level = getfloat("noise", "saturation_level", 0.0)
     adc_bits = getint("noise", "adc_bits", 0)
+    filter_type, rgb_weights = resolve_sensor_filter(
+        get("sensor", "filter_type", fallback="none"),
+        get("sensor", "rgb_weights", fallback="").strip() or None,
+    )
     max_eclipse_fraction = getfloat("sun", "max_eclipse_fraction", 0.15)
     if scene_meters_per_unit <= 0.0:
         raise ValueError("render.scene_meters_per_unit must be positive")
@@ -436,6 +443,8 @@ def load_config(path: Path, kind: str) -> SynthConfig:
         correlation_time_s=correlation_time_s,
         saturation_level=saturation_level,
         adc_bits=adc_bits,
+        filter_type=filter_type,
+        rgb_weights=rgb_weights,
         sun_mode=sun_mode,
         sun_direction=(
             getfloat("sun", "x", 0.71),

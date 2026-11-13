@@ -40,12 +40,74 @@ def test_dataset_config_loads_precession_settings():
     assert config.correlation_time_s == 5.0
     assert config.saturation_level == 1.05
     assert config.adc_bits == 12
+    assert config.filter_type == "none"
+    assert config.rgb_weights is None
 
 
 def test_curve_config_loads_reference_snr():
     config = load_config(PROJECT_ROOT / "config" / "curve.ini", kind="curve")
 
     assert config.reference_snr == 50.0
+
+
+def test_sensor_filter_defaults_to_none_when_section_is_absent(tmp_path):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    source = source.replace("[sensor]\n", "[unused_sensor]\n")
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(source, encoding="utf-8")
+
+    config = load_config(config_path, kind="dataset")
+
+    assert config.filter_type == "none"
+    assert config.rgb_weights is None
+
+
+def test_sensor_filter_preset_is_loaded(tmp_path):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    source = source.replace("filter_type = none", "filter_type = johnson_v")
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(source, encoding="utf-8")
+
+    config = load_config(config_path, kind="dataset")
+
+    assert config.filter_type == "johnson_v"
+    assert config.rgb_weights == pytest.approx((0.2126, 0.7152, 0.0722))
+
+
+def test_sensor_custom_weights_are_loaded_and_normalized(tmp_path):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    source = source.replace(
+        "filter_type = none",
+        "filter_type = custom\nrgb_weights = 2, 2, 0",
+    )
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(source, encoding="utf-8")
+
+    config = load_config(config_path, kind="dataset")
+
+    assert config.filter_type == "custom"
+    assert config.rgb_weights == pytest.approx((0.5, 0.5, 0.0))
+
+
+@pytest.mark.parametrize(
+    ("replacement", "message"),
+    (
+        ("filter_type = x-band", "sensor.filter_type must be one of"),
+        ("filter_type = custom", "sensor.rgb_weights is required"),
+        (
+            "filter_type = custom\nrgb_weights = 0, 0, 0",
+            "sensor.rgb_weights must have a positive sum",
+        ),
+    ),
+)
+def test_invalid_sensor_filter_settings_are_rejected(tmp_path, replacement, message):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    source = source.replace("filter_type = none", replacement)
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(source, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_config(config_path, kind="dataset")
 
 
 @pytest.mark.parametrize("value", ("-0.1", "1.1", "nan", "inf"))

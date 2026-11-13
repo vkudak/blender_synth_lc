@@ -338,7 +338,7 @@ def add_playback_animation(
     scene.frame_set(min(closest_approach_frame, scene.frame_end))
 
 
-def render_flux(scene, frame_path):
+def render_flux(scene, frame_path, rgb_weights=None):
     scene.render.image_settings.file_format = "OPEN_EXR"
     scene.render.image_settings.color_mode = "RGB"
     scene.render.image_settings.color_depth = "32"
@@ -350,8 +350,16 @@ def render_flux(scene, frame_path):
         channels = image.channels
         if not pixels or channels < 3:
             raise RuntimeError(f"Blender produced an empty image buffer for {frame_path}")
+        if rgb_weights is None:
+            return sum(
+                pixels[index] + pixels[index + 1] + pixels[index + 2]
+                for index in range(0, len(pixels), channels)
+            )
+        weight_r, weight_g, weight_b = rgb_weights
         return sum(
-            pixels[index] + pixels[index + 1] + pixels[index + 2]
+            weight_r * pixels[index]
+            + weight_g * pixels[index + 1]
+            + weight_b * pixels[index + 2]
             for index in range(0, len(pixels), channels)
         )
     finally:
@@ -771,7 +779,7 @@ def write_curve_files(
             earth.location = -sample_position
             observer_marker.location = observer_position - sample_position
             light.location = sun_position - sample_position
-            raw_flux = render_flux(scene, frame_path) * solar_fraction
+            raw_flux = render_flux(scene, frame_path, args.rgb_weights) * solar_fraction
             corrected_flux = raw_flux * (reference_range_m / sample.range_m) ** 2
             raw_fluxes.append(raw_flux)
             corrected_fluxes.append(corrected_flux)
@@ -1000,6 +1008,19 @@ def write_curve_files(
         },
         "photometry": {
             "flux_definition": "sum of linear RGB render pixels, multiplied by reference_range^2/range^2",
+            "filter": {
+                "type": args.filter_type,
+                "rgb_weights": (
+                    list(args.rgb_weights) if args.rgb_weights is not None else None
+                ),
+                "weights_note": (
+                    "flux per pixel is w_R * R + w_G * G + w_B * B; weights are "
+                    "normalized to sum 1 and only their ratios affect the curve, "
+                    "which is itself normalized to its maximum. RGB-based filter "
+                    "responses are approximate because materials carry RGB albedos, "
+                    "not reflectance spectra."
+                ),
+            },
             "normalized_to_maximum": True,
             "eclipse_model": "conical Earth shadow with finite solar disk",
             "limitations": (

@@ -29,9 +29,9 @@ Roadmap items for the Blender Synthetic Light Curves project. Items are ordered 
   - Elevation-dependent shot noise retained ✓
   - Saturation clipping and readout noise included; cosmic rays intentionally omitted
   - Documented in `docs/SENSOR_NOISE_MODEL.md`
-- [ ] **Monochrome sensor and filters** — Integrate linear RGB renders into single sensor-weighted flux per sample with configurable filter responses (optional; when `filter_type=None`, output flux as current RGB-based behavior).
-  - Define filter config: `[sensor] filter_type = V-band | custom | None`
-  - RGB weight factors: `rgb_weights = w_R, w_G, w_B` (sum to 1.0)
-  - Examples: luminosity (0.21, 0.72, 0.07), equal RGB (0.33, 0.33, 0.33)
-  - Treat RGB-based spectral response as approximate until material and sensor spectra available.
+- [x] **Monochrome sensor and filters** — Linear RGB renders are integrated into a single sensor-weighted flux per sample via `[sensor] filter_type` (optional; `none` keeps the current plain `R + G + B` behavior).
+  - Filter config: `[sensor] filter_type = none | luminance | johnson_b | johnson_v | johnson_r | custom`
+  - RGB weight factors: `rgb_weights = w_R, w_G, w_B` for `custom` (validated, normalized to sum 1.0)
+  - Presets: luminance/Johnson V (0.2126, 0.7152, 0.0722), Johnson B (0.10, 0.30, 0.60), Cousins R (0.75, 0.22, 0.03)
+  - RGB-based spectral response documented as approximate until material and sensor spectra are available.
 - [x] **Documentation** — Per-section INI reference and worked examples for custom spin-axis/precession configurations.
