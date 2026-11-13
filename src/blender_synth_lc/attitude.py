@@ -1,5 +1,5 @@
 import json
-from math import isfinite, tau
+from math import cos, isfinite, sin, tau
 from pathlib import Path
 from random import Random
 from typing import Mapping
@@ -103,6 +103,26 @@ def precession_phase_rad(
     if period_s <= 0.0:
         raise ValueError("precession period_s must be positive")
     return (initial_phase_rad + tau * time_s / period_s) % tau
+
+
+def tumbling_quaternion(
+    periods_s: tuple[float, float, float],
+    phases_rad: tuple[float, float, float],
+    time_s: float,
+) -> tuple[float, float, float, float]:
+    """Return the X-Y-Z composition as a scalar-first unit quaternion."""
+    x, y, z = (
+        precession_phase_rad(period, time_s, phase) / 2.0
+        for period, phase in zip(periods_s, phases_rad, strict=True)
+    )
+    cx, cy, cz = cos(x), cos(y), cos(z)
+    sx, sy, sz = sin(x), sin(y), sin(z)
+    return (
+        cx * cy * cz - sx * sy * sz,
+        sx * cy * cz + cx * sy * sz,
+        cx * sy * cz - sx * cy * sz,
+        cx * cy * sz + sx * sy * cz,
+    )
 
 
 def sample_precession_parameters(

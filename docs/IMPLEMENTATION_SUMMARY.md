@@ -15,11 +15,13 @@ Parallel dataset generation support was added to `generate_dataset.py`, allowing
 ## Usage
 
 ### Run with 4 parallel workers:
+
 ```bash
 .venv/bin/python scripts/generate_dataset.py --workers 4 --total-curves 10000 --device cuda
 ```
 
 ### Windows PowerShell:
+
 ```powershell
 .venv\Scripts\python scripts/generate_dataset.py `
   --workers 4 `
@@ -53,6 +55,7 @@ Parallel dataset generation support was added to `generate_dataset.py`, allowing
 ## Tests Status
 
 ✅ All 49 tests pass:
+
 - `test_distribute_curve_counts_*` (2 tests)
 - `test_dataset_runner_*` (4 tests)
 - `test_curve_progress_*` (0 tests - sequential mode uses callback)
@@ -125,6 +128,7 @@ Calculate speedup = sequential_time / parallel_time
 ## Support
 
 For issues or questions:
+
 1. Check `PARALLEL_GENERATION_GUIDE.md` troubleshooting section
 2. Review `MULTIPROCESSING_IMPLEMENTATION.md` technical details
 3. Check `blender.log` for Blender-side errors

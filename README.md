@@ -145,7 +145,7 @@ Get-Content reports\dataset\blender.log -Wait -Tail 20
 
 ## Configuration Reference
 
-Both INI files use `[blender]`, `[paths]`, `[run]`, `[observer]`, `[orbit]`, `[pass]`, `[attitude]`, `[sun]`, `[noise]`, and `[render]`. Dataset configuration additionally uses `[dataset]`. Values below are the supported options and their meanings; numeric defaults are the defaults in the loader unless a value is explicitly described as being from the example INI.
+Both INI files use `[blender]`, `[paths]`, `[run]`, `[observer]`, `[orbit]`, `[pass]`, `[sun]`, `[noise]`, and `[render]`. Single-curve configuration uses `[attitude]`; dataset configuration instead uses `[dataset]`, `[dataset.period]`, `[dataset.tumbling]`, `[dataset.precession]`, and `[dataset.scale]`. Values below are the supported options and their meanings; numeric defaults are the defaults in the loader unless a value is explicitly described as being from the example INI.
 
 ### `[blender]`
 
@@ -196,17 +196,17 @@ The orbit is circular and propagated with a two-body Earth gravitational paramet
 
 ### `[attitude]`
 
+Single-curve configuration only. Dataset attitude settings belong in `[dataset.period]`.
+
 - `mode`: `static`, `rotating`, or `random`. Static means spin period `0`; rotating uses `spin_period_s`; random chooses static or rotating. In random mode the default `rotating_fraction=0.5` alternates static and rotating curves by index for balance; other fractions use a seeded random choice.
 - `spin_period_s`: fixed rotating period in seconds; default `20`. Accepted rotating periods are `3` through `180` seconds, subject to configured limits. Period `0` is static; positive periods below the minimum or values above the maximum are rejected.
 - `spin_period_min_s`, `spin_period_max_s`: allowed random-period bounds; defaults `3` and `180`. Minimum must be positive and no greater than maximum.
-- `rotating_fraction`: in `[0, 1]`; default `0.5`. In dataset configuration, `[dataset] rotating_fraction` overrides it for random attitude mode.
-- `initial_phase_mode`: `fixed` or `random`; default `fixed` for a curve and `random` in the dataset example.
+- `rotating_fraction`: probability in `[0, 1]`; default `0.5`.
+- `initial_phase_mode`: `fixed` or `random`; default `fixed`.
 - `initial_phase_rad`: fixed spin phase in radians; default `0`.
-- `precession_angle_deg`: fixed precession cone half-angle in `[0, 180] deg`; `0` disables precession. Default `0`.
-- `precession_period_s`: fixed precession period in seconds; must be positive when the angle is nonzero. Default `60`.
-- `precession_phase_deg`: fixed precession phase in degrees; default `0`.
+- `precession_angle_deg`, `precession_period_s`, `precession_phase_deg`: fixed precession values for a single curve. Dataset configs specify precession in `[dataset.precession]`.
 
-Precession applies only to rotating curves. Dataset runs instead sample the angle and period from the ranges in `[dataset]` and sample a phase uniformly from `0` to `360 deg`.
+Precession applies only to rotating curves. Dataset runs sample a phase uniformly from `0` to `360 deg`.
 
 ### `[sun]`
 
@@ -236,11 +236,33 @@ The render uses Cycles, denoising, AgX, a black background, a close-up orthograp
 ### `[dataset]`
 
 - `total_curves`: positive integer target for the entire dataset; default `10000`. Curves are divided evenly among selected models, with any remainder assigned in selection order.
-- `rotating_fraction`: probability of a rotating curve when `[attitude] mode=random`, in `[0, 1]`; default `0.5`. At exactly `0.5`, the renderer alternates static/rotating curves by curve index.
-- `precession_fraction`: probability that a rotating curve has precession, in `[0, 1]`; default `0.5`. Selection is seeded and independent per curve, so the realized fraction can differ, especially in small datasets. Static curves never precess. A zero sampled precession angle also disables precession.
-- `precession_angle_min_deg`, `precession_angle_max_deg`: ordered range in `[0, 180] deg`; example defaults `5` and `30`.
-- `precession_period_min_s`, `precession_period_max_s`: ordered positive period range in seconds; example defaults `20` and `180`.
-- `model_scale_min`, `model_scale_max`: ordered, finite, positive dimensionless multipliers; example range `1` to `1.5`. Dataset curves independently sample an isotropic multiplier from this range, scaling the model dimensions relative to its calibrated or native size. Curve generation always uses a multiplier of `1`.
+- `workers`: number of parallel Blender processes; defaults to `1` and can be overridden with `--workers`.
+
+### `[dataset.tumbling]`
+
+- `fraction`: probability in `[0, 1]` that any dataset curve tumbles; default `0.01`, including when the section is absent. Selection is seeded independently per curve, so the realized fraction is approximate. Tumbling overrides the selected static/rotating mode and disables precession for that curve; set this to `0` to disable it.
+
+Tumbling is a kinematic approximation, not a torque-free rigid-body simulation. It composes local X, Y, and Z rotations as `Q = Qx @ Qy @ Qz` relative to the model's original orientation. Each axis receives an independently sampled period uniformly within `spin_period_min_s` and `spin_period_max_s` (seconds) and an initial phase uniformly in `[0, 2π)` radians. The quaternion is evaluated at each sample time and animation frame. The model's ordinary spin-axis restrictions do not apply. The JSON sidecar records `tumbling_active`, the X/Y/Z `tumbling_periods_s`, and `tumbling_phases_rad`; for a tumbling curve the legacy spin period, phase, and axis describe only its X component, not a single physical spin axis.
+
+### `[dataset.period]`
+
+- `mode`: `static`, `rotating`, or `random`. Static means spin period `0`; rotating uses `spin_period_s`; random chooses static or rotating.
+- `spin_period_s`: fixed rotating period in seconds; default `20`.
+- `spin_period_min_s`, `spin_period_max_s`: random rotating-period bounds in seconds; defaults `3` and `180`. Both must be finite, and the minimum must be positive and no greater than the maximum.
+- `rotating_fraction`: probability of a rotating curve in random mode, in `[0, 1]`; default `0.5`. At exactly `0.5`, static and rotating curves alternate by curve index.
+- `initial_phase_mode`: `fixed` or `random`; default `fixed`. `initial_phase_rad` sets the fixed spin phase in radians; default `0`.
+
+### `[dataset.precession]`
+
+- `fraction`: probability that a rotating curve has precession, in `[0, 1]`. Selection is seeded and independent per curve, so the realized fraction can differ, especially in small datasets. Static curves never precess.
+- `angle_mode`, `period_mode`: each is `fixed` or `random`. Fixed angle uses `angle_deg`; random mode samples uniformly between `angle_min_deg` and `angle_max_deg` (ordered within `[0, 180] deg`). Fixed period uses `period_s`; random mode samples uniformly between `period_min_s` and `period_max_s` (positive and ordered, in seconds).
+- Only the fields for the selected mode may be present. The example uses `random` for both angle and period.
+
+### `[dataset.scale]`
+
+- `mode`: `fixed` or `random`. Fixed mode uses `factor`; random mode samples uniformly between `min_factor` and `max_factor`.
+- Scale factors are finite, positive, dimensionless, and ordered. Each dataset curve independently samples an isotropic multiplier from the selected value or bounds, scaling model dimensions relative to its calibrated or native size. Curve generation always uses a multiplier of `1`.
+- Only the fields for the selected mode may be present.
 
 ### Spin-axis rules
 

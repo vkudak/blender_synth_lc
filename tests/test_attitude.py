@@ -13,6 +13,7 @@ from blender_synth_lc.attitude import (
     sample_spin_period_s,
     spin_axis_options,
     spin_phase_rad,
+    tumbling_quaternion,
 )
 
 
@@ -72,6 +73,41 @@ def test_precession_requires_positive_finite_period():
     for period_s in (0.0, -1.0, math.inf, math.nan):
         with pytest.raises(ValueError):
             precession_phase_rad(period_s, 0.0)
+
+
+def test_tumbling_quaternion_composes_xyz_rotations():
+    q = tumbling_quaternion((4.0, 4.0, 4.0), (0.0, 0.0, 0.0), 1.0)
+    root_half = math.sqrt(0.5)
+    assert q == pytest.approx((0.0, root_half, 0.0, root_half))
+    assert sum(component * component for component in q) == pytest.approx(1.0)
+
+
+def test_tumbling_quaternion_handles_negative_times_and_invalid_periods():
+    periods = (4.0, 6.0, 8.0)
+    assert tumbling_quaternion(periods, (0.0, 0.0, 0.0), -1.0) == pytest.approx(
+        tumbling_quaternion(periods, (0.0, 0.0, 0.0), 23.0)
+    )
+    with pytest.raises(ValueError, match="positive"):
+        tumbling_quaternion((4.0, 0.0, 8.0), (0.0, 0.0, 0.0), 1.0)
+
+
+def test_tumbling_changes_the_body_frame_rotation_axis():
+    def incremental_axis(time_s):
+        w, x, y, z = tumbling_quaternion((4.0, 6.0, 8.0), (0.0, 0.0, 0.0), time_s)
+        a, b, c, d = tumbling_quaternion(
+            (4.0, 6.0, 8.0), (0.0, 0.0, 0.0), time_s + 0.00001
+        )
+        return (
+            w * b - x * a - y * d + z * c,
+            w * c + x * d - y * a - z * b,
+            w * d - x * c + y * b - z * a,
+        )
+
+    first, second = incremental_axis(0.0), incremental_axis(1.0)
+    cosine = sum(a * b for a, b in zip(first, second)) / (
+        math.hypot(*first) * math.hypot(*second)
+    )
+    assert cosine < 0.9
 
 
 def test_sampled_precession_parameters_stay_in_ranges_and_are_reproducible():

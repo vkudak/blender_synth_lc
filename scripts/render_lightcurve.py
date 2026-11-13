@@ -33,6 +33,7 @@ from blender_synth_lc.attitude import (
     sample_spin_axis,
     sample_spin_period_s,
     spin_phase_rad,
+    tumbling_quaternion,
 )
 from blender_synth_lc.illumination import (
     PENUMBRA,
@@ -358,6 +359,12 @@ def render_flux(scene, frame_path):
 
 
 def satellite_rotation(scenario, original_rotation, time_s):
+    if scenario["tumbling_active"]:
+        return original_rotation @ Quaternion(
+            tumbling_quaternion(
+                scenario["tumbling_periods_s"], scenario["tumbling_phases_rad"], time_s
+            )
+        )
     spin_axis = Vector(scenario["spin_axis"]).normalized()
     spin_rotation = Quaternion(
         spin_axis,
@@ -600,6 +607,26 @@ def build_scenario(config, curve_index, model_spin_axes):
     spin_period_s, initial_phase_rad, spin_axis = build_attitude(
         config, rng, curve_index, model_spin_axes
     )
+    tumbling_rng = random.Random(f"tumbling:{config.seed}:{curve_index}")
+    tumbling_active = (
+        config.kind == "dataset" and tumbling_rng.random() < config.tumbling_fraction
+    )
+    tumbling_periods_s = ()
+    tumbling_phases_rad = ()
+    if tumbling_active:
+        tumbling_periods_s = tuple(
+            sample_spin_period_s(
+                tumbling_rng,
+                rotating=True,
+                min_period_s=config.spin_period_min_s,
+                max_period_s=config.spin_period_max_s,
+            )
+            for _ in range(3)
+        )
+        tumbling_phases_rad = tuple(tumbling_rng.uniform(0.0, tau) for _ in range(3))
+        spin_period_s = tumbling_periods_s[0]
+        initial_phase_rad = tumbling_phases_rad[0]
+        spin_axis = (1.0, 0.0, 0.0)
     visible_pass = build_visible_pass(config, rng, observer)
     samples = sample_pass_window(
         visible_pass,
@@ -628,7 +655,7 @@ def build_scenario(config, curve_index, model_spin_axes):
             precession_phase_rad_value,
         ) = sample_precession_parameters(
             rng,
-            rotating=spin_period_s > 0.0,
+            rotating=spin_period_s > 0.0 and not tumbling_active,
             angle_min_deg=config.precession_angle_min_deg,
             angle_max_deg=config.precession_angle_max_deg,
             period_min_s=config.precession_period_min_s,
@@ -642,10 +669,15 @@ def build_scenario(config, curve_index, model_spin_axes):
         "spin_period_s": spin_period_s,
         "initial_phase_rad": initial_phase_rad,
         "spin_axis": spin_axis,
+        "tumbling_active": tumbling_active,
+        "tumbling_periods_s": tumbling_periods_s,
+        "tumbling_phases_rad": tumbling_phases_rad,
         "precession_angle_deg": precession_angle_deg,
         "precession_period_s": precession_period_s,
         "precession_phase_rad": precession_phase_rad_value,
-        "precession_active": spin_period_s > 0.0 and precession_angle_deg > 0.0,
+        "precession_active": (
+            not tumbling_active and spin_period_s > 0.0 and precession_angle_deg > 0.0
+        ),
         "model_scale_factor": (
             rng.uniform(config.model_scale_min, config.model_scale_max)
             if config.kind == "dataset"
@@ -836,7 +868,8 @@ def write_curve_files(
         time_from_start_s,
         relative_flux,
         plot_path,
-        f"{args.model.stem} | normalized flux | spin {spin_period_s:.3g}s",
+        f"{args.model.stem} | normalized flux | "
+        + ("tumbling" if scenario["tumbling_active"] else f"spin {spin_period_s:.3g}s"),
     )
     metadata = {
         "model": str(args.model.resolve()),
@@ -884,9 +917,12 @@ def write_curve_files(
         },
         "attitude": {
             "spin_period_s": spin_period_s,
-            "rotating": is_rotating(spin_period_s),
+            "rotating": scenario["tumbling_active"] or is_rotating(spin_period_s),
             "initial_phase_rad": scenario["initial_phase_rad"],
             "spin_axis": list(scenario["spin_axis"]),
+            "tumbling_active": scenario["tumbling_active"],
+            "tumbling_periods_s": list(scenario["tumbling_periods_s"]),
+            "tumbling_phases_rad": list(scenario["tumbling_phases_rad"]),
             "precession_angle_deg": scenario["precession_angle_deg"],
             "precession_period_s": scenario["precession_period_s"],
             "precession_phase_deg": degrees(scenario["precession_phase_rad"]),

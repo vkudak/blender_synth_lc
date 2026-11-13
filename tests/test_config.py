@@ -17,14 +17,20 @@ def test_dataset_config_loads_precession_settings():
     config = load_config(PROJECT_ROOT / "config" / "dataset.ini", kind="dataset")
 
     assert config.count == 10_000
-    assert config.precession_angle_deg == 0.0
-    assert config.precession_period_s == 60.0
-    assert config.precession_phase_deg == 0.0
+    assert config.attitude_mode == "random"
+    assert config.spin_period_s == 20.0
+    assert config.spin_period_min_s == 3.0
+    assert config.spin_period_max_s == 180.0
+    assert config.rotating_fraction == 0.5
+    assert config.tumbling_fraction == 0.01
+    assert config.initial_phase_mode == "random"
+    assert config.initial_phase_rad == 0.0
     assert config.precession_fraction == 0.5
     assert config.precession_angle_min_deg == 5.0
     assert config.precession_angle_max_deg == 30.0
     assert config.precession_period_min_s == 20.0
     assert config.precession_period_max_s == 180.0
+    assert config.precession_phase_deg == 0.0
     assert config.model_scale_min == 1.0
     assert config.model_scale_max == 1.5
     assert config.reference_snr == 50.0
@@ -34,6 +40,41 @@ def test_curve_config_loads_reference_snr():
     config = load_config(PROJECT_ROOT / "config" / "curve.ini", kind="curve")
 
     assert config.reference_snr == 50.0
+
+
+@pytest.mark.parametrize("value", ("-0.1", "1.1", "nan", "inf"))
+def test_invalid_dataset_tumbling_fraction_is_rejected(tmp_path, value):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(
+        source.replace("fraction = 0.01", f"fraction = {value}"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"dataset.tumbling.fraction must be in \[0, 1\]"):
+        load_config(config_path, kind="dataset")
+
+
+def test_tumbling_fraction_defaults_and_can_be_disabled(tmp_path):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(source.replace("[dataset.tumbling]", "[unused.tumbling]"), encoding="utf-8")
+    assert load_config(config_path, kind="dataset").tumbling_fraction == 0.01
+    config_path.write_text(source.replace("fraction = 0.01", "fraction = 0"), encoding="utf-8")
+    assert load_config(config_path, kind="dataset").tumbling_fraction == 0.0
+    assert load_config(PROJECT_ROOT / "config" / "curve.ini", kind="curve").tumbling_fraction == 0.0
+
+
+@pytest.mark.parametrize("value", ("nan", "inf"))
+def test_non_finite_tumbling_period_bounds_are_rejected(tmp_path, value):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(
+        source.replace("spin_period_max_s = 180", f"spin_period_max_s = {value}"),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="spin period bounds must be finite"):
+        load_config(config_path, kind="dataset")
 
 
 @pytest.mark.parametrize("value", ("0", "-1", "nan", "inf"))
@@ -50,13 +91,13 @@ def test_invalid_reference_snr_is_rejected(tmp_path, value):
 
 
 @pytest.mark.parametrize("setting,value", (
-    ("model_scale_min", "0"),
-    ("model_scale_max", "nan"),
-    ("model_scale_max", "0.5"),
+    ("min_factor", "0"),
+    ("max_factor", "nan"),
+    ("max_factor", "0.5"),
 ))
 def test_invalid_dataset_model_scale_ranges_are_rejected(tmp_path, setting, value):
     source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
-    original = "1" if setting == "model_scale_min" else "1.5"
+    original = "1" if setting == "min_factor" else "1.5"
     config_path = tmp_path / "dataset.ini"
     config_path.write_text(
         source.replace(f"{setting} = {original}", f"{setting} = {value}"),
@@ -87,21 +128,22 @@ def test_legacy_curves_per_model_setting_requires_migration(tmp_path):
         load_config(config_path, kind="dataset")
 
 
-def test_dataset_precession_fraction_defaults_to_half(tmp_path):
+def test_dataset_precession_fraction_is_required(tmp_path):
     source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
     config_path = tmp_path / "dataset.ini"
-    config_path.write_text(source.replace("precession_fraction = 0.5\n", ""), encoding="utf-8")
+    config_path.write_text(source.replace("\nfraction = 0.5\n", "\n"), encoding="utf-8")
 
-    assert load_config(config_path, kind="dataset").precession_fraction == 0.5
+    with pytest.raises(ValueError, match=r"dataset.precession options are invalid \(missing: fraction\)"):
+        load_config(config_path, kind="dataset")
 
 
 @pytest.mark.parametrize("value", ("-0.1", "1.1", "nan", "inf"))
 def test_invalid_dataset_precession_fraction_is_rejected(tmp_path, value):
     source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
     config_path = tmp_path / "dataset.ini"
-    config_path.write_text(source.replace("precession_fraction = 0.5", f"precession_fraction = {value}"), encoding="utf-8")
+    config_path.write_text(source.replace("\nfraction = 0.5", f"\nfraction = {value}"), encoding="utf-8")
 
-    with pytest.raises(ValueError, match=r"dataset.precession_fraction must be in \[0, 1\]"):
+    with pytest.raises(ValueError, match=r"dataset.precession.fraction must be in \[0, 1\]"):
         load_config(config_path, kind="dataset")
 
 
@@ -242,17 +284,30 @@ def test_model_size_map_scales_each_axis_to_target_meters():
 @pytest.mark.parametrize(
     ("setting", "value", "message"),
     (
-        ("precession_angle_deg", "181", "must be in \\[0, 180\\]"),
-        ("precession_period_s", "0", "must be positive"),
-        ("precession_phase_deg", "nan", "must be finite"),
+        ("angle_max_deg", "181", "angle range"),
+        ("period_min_s", "0", "period range"),
     ),
 )
-def test_invalid_precession_settings_are_rejected(tmp_path, setting, value, message):
+def test_invalid_dataset_precession_ranges_are_rejected(tmp_path, setting, value, message):
     source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
-    source = source.replace(f"{setting} = 0", f"{setting} = {value}")
-    if setting == "precession_period_s":
-        source = source.replace("precession_angle_deg = 0", "precession_angle_deg = 10")
-        source = source.replace(f"{setting} = 60", f"{setting} = {value}")
+    original = "30" if setting == "angle_max_deg" else "20"
+    source = source.replace(f"{setting} = {original}", f"{setting} = {value}")
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(source, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_config(config_path, kind="dataset")
+
+@pytest.mark.parametrize(
+    ("setting", "original", "value", "message"),
+    (
+        ("angle_min_deg", "5", "31", "angle range"),
+        ("period_max_s", "180", "10", "period range"),
+    ),
+)
+def test_reversed_dataset_precession_ranges_are_rejected(tmp_path, setting, original, value, message):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    source = source.replace(f"{setting} = {original}", f"{setting} = {value}")
     config_path = tmp_path / "dataset.ini"
     config_path.write_text(source, encoding="utf-8")
 
@@ -260,18 +315,63 @@ def test_invalid_precession_settings_are_rejected(tmp_path, setting, value, mess
         load_config(config_path, kind="dataset")
 
 
-@pytest.mark.parametrize(
-    ("setting", "value", "message"),
-    (
-        ("precession_angle_min_deg", "31", "angle range"),
-        ("precession_period_max_s", "10", "period range"),
-    ),
-)
-def test_invalid_dataset_precession_ranges_are_rejected(tmp_path, setting, value, message):
+def test_dataset_fixed_precession_period_and_scale_are_loaded(tmp_path):
     source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
-    source = source.replace(f"{setting} = { {'precession_angle_min_deg': '5', 'precession_period_max_s': '180'}[setting] }", f"{setting} = {value}")
+    source = source.replace(
+        "period_mode = random\nperiod_min_s = 20\nperiod_max_s = 180",
+        "period_mode = fixed\nperiod_s = 60",
+    )
+    source = source.replace(
+        "mode = random\nmin_factor = 1\nmax_factor = 1.5",
+        "mode = fixed\nfactor = 1.25",
+    )
     config_path = tmp_path / "dataset.ini"
     config_path.write_text(source, encoding="utf-8")
 
-    with pytest.raises(ValueError, match=message):
+    config = load_config(config_path, kind="dataset")
+
+    assert config.precession_period_min_s == config.precession_period_max_s == 60.0
+    assert config.model_scale_min == config.model_scale_max == 1.25
+
+
+def test_dataset_rejects_fields_unused_by_selected_mode(tmp_path):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    source = source.replace(
+        "mode = random\nmin_factor = 1\nmax_factor = 1.5",
+        "mode = fixed\nfactor = 1.25\nmin_factor = 1\nmax_factor = 1.5",
+    )
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(source, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unused for selected mode"):
+        load_config(config_path, kind="dataset")
+
+
+def test_dataset_mode_uses_random_not_range_for_bounds(tmp_path):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    source = source.replace("angle_mode = random", "angle_mode = range")
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(source, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be 'fixed' or 'random'"):
+        load_config(config_path, kind="dataset")
+
+
+def test_dataset_config_requires_dataset_period_section(tmp_path):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    source = source.replace("[dataset.period]\n", "[attitude]\n")
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(source, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="dataset.period"):
+        load_config(config_path, kind="dataset")
+
+
+def test_dataset_config_rejects_curve_attitude_section(tmp_path):
+    source = (PROJECT_ROOT / "config" / "dataset.ini").read_text(encoding="utf-8")
+    source = source.replace("[dataset.period]\n", "[attitude]\nmode = random\n\n[dataset.period]\n")
+    config_path = tmp_path / "dataset.ini"
+    config_path.write_text(source, encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"use \[dataset.period\], not \[attitude\]"):
         load_config(config_path, kind="dataset")

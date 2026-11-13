@@ -62,6 +62,7 @@ class SynthConfig:
     spin_period_min_s: float
     spin_period_max_s: float
     rotating_fraction: float
+    tumbling_fraction: float
     initial_phase_mode: str
     initial_phase_rad: float
     precession_angle_deg: float
@@ -95,12 +96,18 @@ def load_config(path: Path, kind: str) -> SynthConfig:
 
     parser = configparser.ConfigParser(inline_comment_prefixes=("#", ";"))
     parser.read(config_path, encoding="utf-8")
-    required = {"blender", "paths", "run", "observer", "orbit", "pass", "attitude", "sun", "render"}
+    required = {"blender", "paths", "run", "observer", "orbit", "pass", "sun", "render"}
     if kind == "dataset":
-        required.add("dataset")
+        required.update(
+            {"dataset", "dataset.period", "dataset.precession", "dataset.scale"}
+        )
+    else:
+        required.add("attitude")
     missing = sorted(section for section in required if not parser.has_section(section))
     if missing:
         raise ValueError(f"{config_path} is missing sections: {', '.join(missing)}")
+    if kind == "dataset" and parser.has_section("attitude"):
+        raise ValueError("dataset config must use [dataset.period], not [attitude]")
 
     def get(section, option, fallback=None):
         if fallback is None:
@@ -144,44 +151,111 @@ def load_config(path: Path, kind: str) -> SynthConfig:
         _split_list(get("paths", "skip_models", fallback=",".join(DEFAULT_SKIP_MODELS)))
     )
 
-    spin_period_min_s = getfloat("attitude", "spin_period_min_s", MIN_ROTATION_PERIOD_S)
-    spin_period_max_s = getfloat("attitude", "spin_period_max_s", ROTATION_PERIOD_CUTOFF_S)
-    if spin_period_min_s <= 0.0 or spin_period_max_s < spin_period_min_s:
-        raise ValueError("spin_period_min_s must be positive and not exceed spin_period_max_s")
+    period_section = "dataset.period" if kind == "dataset" else "attitude"
+    spin_period_s = getfloat(period_section, "spin_period_s", 20.0)
+    spin_period_min_s = getfloat(period_section, "spin_period_min_s", MIN_ROTATION_PERIOD_S)
+    spin_period_max_s = getfloat(period_section, "spin_period_max_s", ROTATION_PERIOD_CUTOFF_S)
+    rotating_fraction = getfloat(period_section, "rotating_fraction", 0.5)
+    tumbling_fraction = (
+        getfloat("dataset.tumbling", "fraction", 0.01) if kind == "dataset" else 0.0
+    )
+    initial_phase_mode = get(period_section, "initial_phase_mode", "fixed").strip().lower()
+    initial_phase_rad = getfloat(period_section, "initial_phase_rad", 0.0)
+    if (
+        not isfinite(spin_period_min_s)
+        or not isfinite(spin_period_max_s)
+        or spin_period_min_s <= 0.0
+        or spin_period_max_s < spin_period_min_s
+    ):
+        raise ValueError("spin period bounds must be finite, positive, and ordered")
 
-    precession_angle_deg = getfloat("attitude", "precession_angle_deg", 0.0)
-    precession_period_s = getfloat("attitude", "precession_period_s", 0.0)
-    precession_phase_deg = getfloat("attitude", "precession_phase_deg", 0.0)
-    precession_angle_min_deg = (
-        parser.getfloat("dataset", "precession_angle_min_deg", fallback=precession_angle_deg)
-        if kind == "dataset"
-        else precession_angle_deg
-    )
-    precession_angle_max_deg = (
-        parser.getfloat("dataset", "precession_angle_max_deg", fallback=precession_angle_deg)
-        if kind == "dataset"
-        else precession_angle_deg
-    )
-    precession_period_min_s = (
-        parser.getfloat("dataset", "precession_period_min_s", fallback=precession_period_s)
-        if kind == "dataset"
-        else precession_period_s
-    )
-    precession_period_max_s = (
-        parser.getfloat("dataset", "precession_period_max_s", fallback=precession_period_s)
-        if kind == "dataset"
-        else precession_period_s
-    )
-    model_scale_min = (
-        parser.getfloat("dataset", "model_scale_min", fallback=1.0)
-        if kind == "dataset"
-        else 1.0
-    )
-    model_scale_max = (
-        parser.getfloat("dataset", "model_scale_max", fallback=1.0)
-        if kind == "dataset"
-        else 1.0
-    )
+    precession_angle_deg = 0.0
+    precession_period_s = 0.0
+    precession_phase_deg = 0.0
+    precession_fraction = 1.0
+    if kind == "dataset":
+        legacy_dataset_options = {
+            "precession_fraction",
+            "precession_angle_min_deg",
+            "precession_angle_max_deg",
+            "precession_period_min_s",
+            "precession_period_max_s",
+            "model_scale_min",
+            "model_scale_max",
+            "rotating_fraction",
+        } & set(parser.options("dataset"))
+        if legacy_dataset_options:
+            names = ", ".join(sorted(f"dataset.{name}" for name in legacy_dataset_options))
+            raise ValueError(
+                f"dataset settings moved to [dataset.period], [dataset.precession], "
+                f"or [dataset.scale]: {names}"
+            )
+
+        def read_fixed_or_random(
+            section, mode_option, fixed_option, minimum_option, maximum_option
+        ):
+            mode = parser.get(section, mode_option).strip().lower()
+            if mode == "fixed":
+                expected = {mode_option, fixed_option}
+                missing = expected - set(parser.options(section))
+                if missing:
+                    raise ValueError(f"{section} is missing options: {', '.join(sorted(missing))}")
+                value = parser.getfloat(section, fixed_option)
+                return value, value, expected
+            if mode == "random":
+                expected = {mode_option, minimum_option, maximum_option}
+                missing = expected - set(parser.options(section))
+                if missing:
+                    raise ValueError(f"{section} is missing options: {', '.join(sorted(missing))}")
+                minimum = parser.getfloat(section, minimum_option)
+                maximum = parser.getfloat(section, maximum_option)
+                return minimum, maximum, expected
+            raise ValueError(
+                f"{section}.{mode_option} must be 'fixed' or 'random' (got {mode!r})"
+            )
+
+        precession_angle_min_deg, precession_angle_max_deg, angle_options = read_fixed_or_random(
+            "dataset.precession", "angle_mode", "angle_deg", "angle_min_deg", "angle_max_deg"
+        )
+        precession_period_min_s, precession_period_max_s, period_options = read_fixed_or_random(
+            "dataset.precession", "period_mode", "period_s", "period_min_s", "period_max_s"
+        )
+        model_scale_min, model_scale_max, scale_options = read_fixed_or_random(
+            "dataset.scale", "mode", "factor", "min_factor", "max_factor"
+        )
+
+        expected_precession_options = angle_options | period_options | {"fraction"}
+        actual_precession_options = set(parser.options("dataset.precession"))
+        expected_scale_options = scale_options
+        actual_scale_options = set(parser.options("dataset.scale"))
+        for section, actual, expected in (
+            ("dataset.precession", actual_precession_options, expected_precession_options),
+            ("dataset.scale", actual_scale_options, expected_scale_options),
+        ):
+            missing_options = expected - actual
+            unused_options = actual - expected
+            if missing_options or unused_options:
+                details = []
+                if missing_options:
+                    details.append(f"missing: {', '.join(sorted(missing_options))}")
+                if unused_options:
+                    details.append(f"unused for selected mode: {', '.join(sorted(unused_options))}")
+                raise ValueError(f"{section} options are invalid ({'; '.join(details)})")
+
+        precession_fraction = parser.getfloat("dataset.precession", "fraction")
+        precession_angle_deg = precession_angle_min_deg
+        precession_period_s = precession_period_min_s
+        precession_phase_deg = 0.0
+    else:
+        precession_angle_deg = getfloat("attitude", "precession_angle_deg", 0.0)
+        precession_period_s = getfloat("attitude", "precession_period_s", 0.0)
+        precession_phase_deg = getfloat("attitude", "precession_phase_deg", 0.0)
+        precession_angle_min_deg = precession_angle_deg
+        precession_angle_max_deg = precession_angle_deg
+        precession_period_min_s = precession_period_s
+        precession_period_max_s = precession_period_s
+        model_scale_min = 1.0
+        model_scale_max = 1.0
     if not all(isfinite(value) for value in (
         precession_angle_deg,
         precession_period_s,
@@ -192,14 +266,15 @@ def load_config(path: Path, kind: str) -> SynthConfig:
         precession_period_max_s,
     )):
         raise ValueError("precession settings must be finite")
-    if not 0.0 <= precession_angle_deg <= 180.0:
-        raise ValueError("attitude.precession_angle_deg must be in [0, 180]")
-    if precession_period_s < 0.0 or (
-        precession_angle_deg > 0.0 and precession_period_s <= 0.0
-    ):
-        raise ValueError(
-            "attitude.precession_period_s must be positive when precession is enabled"
-        )
+    if kind == "curve":
+        if not 0.0 <= precession_angle_deg <= 180.0:
+            raise ValueError("attitude.precession_angle_deg must be in [0, 180]")
+        if precession_period_s < 0.0 or (
+            precession_angle_deg > 0.0 and precession_period_s <= 0.0
+        ):
+            raise ValueError(
+                "attitude.precession_period_s must be positive when precession is enabled"
+            )
     if not 0.0 <= precession_angle_min_deg <= precession_angle_max_deg <= 180.0:
         raise ValueError("dataset precession angle range must be within [0, 180]")
     if precession_period_min_s <= 0.0 or precession_period_max_s < precession_period_min_s:
@@ -226,22 +301,19 @@ def load_config(path: Path, kind: str) -> SynthConfig:
 
     observer_mode = get("observer", "mode", "fixed").strip().lower()
     orbit_mode = get("orbit", "mode", "random").strip().lower()
-    attitude_mode = get("attitude", "mode", "rotating").strip().lower()
-    initial_phase_mode = get("attitude", "initial_phase_mode", "fixed").strip().lower()
+    attitude_mode = get(period_section, "mode", "rotating").strip().lower()
     sun_mode = get("sun", "mode", "random").strip().lower()
     for name, value, allowed in (
         ("observer.mode", observer_mode, {"fixed", "random"}),
         ("orbit.mode", orbit_mode, {"fixed", "random"}),
-        ("attitude.mode", attitude_mode, {"static", "rotating", "random"}),
-        ("attitude.initial_phase_mode", initial_phase_mode, {"fixed", "random"}),
+        (f"{period_section}.mode", attitude_mode, {"static", "rotating", "random"}),
+        (f"{period_section}.initial_phase_mode", initial_phase_mode, {"fixed", "random"}),
         ("sun.mode", sun_mode, {"random", "vector"}),
     ):
         if value not in allowed:
             raise ValueError(f"{name} must be one of {', '.join(sorted(allowed))}")
 
     count = 1
-    rotating_fraction = getfloat("attitude", "rotating_fraction", 0.5)
-    precession_fraction = 1.0
     if kind == "dataset":
         if parser.has_option("dataset", "curves_per_model"):
             raise ValueError(
@@ -249,14 +321,14 @@ def load_config(path: Path, kind: str) -> SynthConfig:
                 "use dataset.total_curves"
             )
         count = parser.getint("dataset", "total_curves", fallback=10_000)
-        rotating_fraction = parser.getfloat("dataset", "rotating_fraction", fallback=rotating_fraction)
-        precession_fraction = parser.getfloat("dataset", "precession_fraction", fallback=0.5)
     if count < 1:
         raise ValueError("count/total_curves must be at least 1")
     if not 0.0 <= rotating_fraction <= 1.0:
         raise ValueError("rotating_fraction must be in [0, 1]")
+    if not 0.0 <= tumbling_fraction <= 1.0:
+        raise ValueError("dataset.tumbling.fraction must be in [0, 1]")
     if not 0.0 <= precession_fraction <= 1.0:
-        raise ValueError("dataset.precession_fraction must be in [0, 1]")
+        raise ValueError("dataset.precession.fraction must be in [0, 1]")
 
     minimum_elevation_deg = getfloat(
         "pass", "minimum_elevation_deg", DEFAULT_MINIMUM_ELEVATION_DEG
@@ -312,12 +384,13 @@ def load_config(path: Path, kind: str) -> SynthConfig:
         minimum_elevation_deg=minimum_elevation_deg,
         max_pass_attempts=getint("pass", "max_attempts", 1000),
         attitude_mode=attitude_mode,
-        spin_period_s=getfloat("attitude", "spin_period_s", 20.0),
+        spin_period_s=spin_period_s,
         spin_period_min_s=spin_period_min_s,
         spin_period_max_s=spin_period_max_s,
         rotating_fraction=rotating_fraction,
+        tumbling_fraction=tumbling_fraction,
         initial_phase_mode=initial_phase_mode,
-        initial_phase_rad=getfloat("attitude", "initial_phase_rad", 0.0),
+        initial_phase_rad=initial_phase_rad,
         precession_angle_deg=precession_angle_deg,
         precession_period_s=precession_period_s,
         precession_phase_deg=precession_phase_deg,

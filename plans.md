@@ -18,7 +18,7 @@ Roadmap items for the Blender Synthetic Light Curves project. Items are ordered 
 ## Mid Term
 
 - [x] **Eclipse/shadow refinement** — Use conical umbra/penumbra geometry with finite-Sun-disk illumination, count both shadow states toward the eclipse limit, scale penumbra flux, and report shadow state per sample.
-- [ ] **Attitude expansions** — Add tumbling/non-principal-axis rotation modes and configurable attitude quaternion timelines.
+- [x] **Attitude expansions** — Add tumbling/non-principal-axis rotation modes and configurable attitude quaternion timelines.
 
 ## Long Term
 
